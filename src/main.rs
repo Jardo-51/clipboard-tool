@@ -15,6 +15,7 @@ mod history;
 mod persist;
 mod platform;
 mod tray;
+mod wayland;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -85,14 +86,24 @@ fn main() -> eframe::Result<()> {
     // --- Throttled history persistence (Phase 7) -------------------------
     spawn_persistence(shared.clone());
 
-    // --- Global hotkey (Phase 1, configurable in Phase 7) ----------------
+    // --- Global hotkey (Phase 1/7; Wayland portal backend in Phase 5) ----
+    // On X11/Windows/macOS use the `global-hotkey` key grab. On Wayland that
+    // doesn't work, so we use the GlobalShortcuts portal instead.
+    let use_portal_hotkey = platform::detect_session() == platform::SessionType::Wayland;
+    let portal_trigger = wayland::to_portal_trigger(&config.hotkey);
+
     // The manager must outlive the program, so keep it alive on the stack.
-    let manager = GlobalHotKeyManager::new().expect("failed to init global hotkey manager");
-    let hotkey = config.parse_hotkey();
-    manager
-        .register(hotkey)
-        .expect("failed to register global hotkey");
-    let hotkey_id = hotkey.id();
+    let hotkey_manager = if use_portal_hotkey {
+        None
+    } else {
+        let manager = GlobalHotKeyManager::new().expect("failed to init global hotkey manager");
+        let hotkey = config.parse_hotkey();
+        manager
+            .register(hotkey)
+            .expect("failed to register global hotkey");
+        Some((manager, hotkey.id()))
+    };
+    let hotkey_id = hotkey_manager.as_ref().map(|(_, id)| *id);
 
     // --- egui popup ------------------------------------------------------
     let native_options = eframe::NativeOptions {
@@ -116,20 +127,28 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
 
-            // Wake the event loop whenever a hotkey fires, even while hidden.
+            // Wake the event loop whenever the hotkey fires, even while hidden.
             let shared_for_hotkeys = shared.clone();
             let ctx_for_hotkeys = ctx.clone();
-            std::thread::spawn(move || {
-                let receiver = GlobalHotKeyEvent::receiver();
-                while let Ok(event) = receiver.recv() {
-                    if event.id == hotkey_id
-                        && event.state == global_hotkey::HotKeyState::Pressed
-                    {
-                        shared_for_hotkeys.show_requested.store(true, Ordering::SeqCst);
-                        ctx_for_hotkeys.request_repaint();
+            let on_hotkey = move || {
+                shared_for_hotkeys.show_requested.store(true, Ordering::SeqCst);
+                ctx_for_hotkeys.request_repaint();
+            };
+
+            if use_portal_hotkey {
+                wayland::spawn_portal_hotkey(portal_trigger, on_hotkey);
+            } else if let Some(id) = hotkey_id {
+                std::thread::spawn(move || {
+                    let receiver = GlobalHotKeyEvent::receiver();
+                    while let Ok(event) = receiver.recv() {
+                        if event.id == id
+                            && event.state == global_hotkey::HotKeyState::Pressed
+                        {
+                            on_hotkey();
+                        }
                     }
-                }
-            });
+                });
+            }
 
             // Tray icon (its own GTK loop on Linux; no-op elsewhere for now).
             tray::spawn(shared.clone(), ctx.clone());
@@ -138,7 +157,7 @@ fn main() -> eframe::Result<()> {
         }),
     )?;
 
-    drop(manager);
+    drop(hotkey_manager);
     save_history(&shared_main); // best-effort flush if the loop ever returns
     Ok(())
 }

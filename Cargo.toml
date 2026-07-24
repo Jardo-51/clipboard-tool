@@ -11,16 +11,22 @@ clipboard-master = "4.0.0"
 dirs = "6.0.0"
 eframe = "0.35.0"
 egui = "0.35.0"
-enigo = "0.6.1"
+# `wayland` enables the virtual-keyboard injection backend (wlroots: Sway/Hyprland);
+# enigo auto-selects X11 vs Wayland at runtime.
+enigo = { version = "0.6.1", features = ["wayland"] }
 global-hotkey = "0.8.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 toml = "1.1.3"
 tray-icon = "0.24.1"
 
-# The tray needs a GTK main loop on Linux; matches the gtk version tray-icon/muda use.
+# Linux-only: the GTK tray loop and the Wayland GlobalShortcuts portal hotkey.
+# Kept off the Windows/macOS builds to stay lean there.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "global_shortcuts"] }
+tokio = { version = "1.53.1", features = ["rt", "net", "time", "macros"] }
+futures-util = "0.3"
 
 [profile.release]
 opt-level = "z"     # optimize for size (resource-efficient goal)

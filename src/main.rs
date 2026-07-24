@@ -10,9 +10,11 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod history;
+mod platform;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
@@ -24,6 +26,9 @@ use history::HistoryStore;
 const HISTORY_CAPACITY: usize = 100;
 const POPUP_WIDTH: f32 = 460.0;
 const POPUP_HEIGHT: f32 = 340.0;
+/// Grace period after hiding the popup before synthesizing the paste, so the
+/// OS can return focus to the previously active window.
+const FOCUS_RETURN_DELAY: Duration = Duration::from_millis(120);
 
 /// Shared application state between the clipboard-watcher thread, the
 /// hotkey-listener thread, and the egui UI thread.
@@ -31,12 +36,15 @@ struct Shared {
     history: Mutex<HistoryStore>,
     /// Set by the hotkey thread; consumed by the UI to show the popup.
     show_requested: AtomicBool,
+    /// Backend that pastes a chosen item into the focused window.
+    injector: Box<dyn platform::InputInjector>,
 }
 
 fn main() -> eframe::Result<()> {
     let shared = Arc::new(Shared {
         history: Mutex::new(HistoryStore::new(HISTORY_CAPACITY)),
         show_requested: AtomicBool::new(false),
+        injector: platform::default_injector(),
     });
 
     // --- Clipboard watcher (Phase 2) -------------------------------------
@@ -164,9 +172,9 @@ impl PopupApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }
 
-    /// Commit the currently selected item. For now this places it back on the
-    /// clipboard; Phase 4 will additionally synthesize a paste into the
-    /// previously focused window.
+    /// Commit the currently selected item: hide the popup so focus returns to
+    /// the previously active window, then (off the UI thread) place the item on
+    /// the clipboard and synthesize a paste into that window.
     fn commit_selection(&mut self, ctx: &egui::Context) {
         let chosen = self
             .shared
@@ -174,12 +182,22 @@ impl PopupApp {
             .lock()
             .ok()
             .and_then(|h| h.get(self.selected).cloned());
-        if let Some(text) = chosen {
-            if let Ok(mut cb) = arboard::Clipboard::new() {
-                let _ = cb.set_text(text);
-            }
-        }
+
+        // Hide first — the target app must regain focus before we paste.
         self.hide_popup(ctx);
+
+        if let Some(text) = chosen {
+            let shared = self.shared.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(FOCUS_RETURN_DELAY);
+                if let Err(e) = shared.injector.paste(&text) {
+                    eprintln!(
+                        "auto-paste failed ({e}); the item is on the clipboard — press \
+                         Ctrl+V to paste it manually."
+                    );
+                }
+            });
+        }
     }
 }
 

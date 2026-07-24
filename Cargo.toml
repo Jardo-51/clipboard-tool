@@ -9,6 +9,7 @@ arboard = "3.6.1"
 clipboard-master = "4.0.0"
 eframe = "0.35.0"
 egui = "0.35.0"
+enigo = "0.6.1"
 global-hotkey = "0.8.0"
 # versions filled in by `cargo add` inside the nix dev shell
 

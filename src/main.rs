@@ -307,6 +307,13 @@ struct PopupApp {
     shared: Arc<Shared>,
     selected: usize,
     visible: bool,
+    /// False until the first `logic` frame has enforced the hidden state.
+    initialized: bool,
+    /// Whether the popup has actually held keyboard focus since it was last
+    /// shown. Used to defer the focus-loss auto-dismiss until *after* the
+    /// window manager has granted focus, so the popup doesn't hide itself on
+    /// the very frame it appears (before focus lands).
+    focused_once: bool,
 }
 
 impl PopupApp {
@@ -315,12 +322,15 @@ impl PopupApp {
             shared,
             selected: 0,
             visible: false,
+            initialized: false,
+            focused_once: false,
         }
     }
 
     fn show_popup(&mut self, ctx: &egui::Context) {
         self.visible = true;
         self.selected = 0;
+        self.focused_once = false;
         center_on_screen(ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -361,12 +371,28 @@ impl PopupApp {
 }
 
 impl eframe::App for PopupApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
+    /// Runs every frame *including while the window is hidden* (unlike `ui`,
+    /// which eframe only calls for a visible viewport). The show-on-hotkey
+    /// trigger must live here: it sends `Visible(true)`, and only on the next
+    /// frame — once the viewport is visible — does `ui` start being called.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Some window managers ignore `ViewportBuilder::with_visible(false)` and
+        // map the window anyway, leaving a blank popup on screen at startup.
+        // Enforce the hidden state once, up front.
+        if !self.initialized {
+            self.initialized = true;
+            if !self.visible {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+        }
 
         if self.shared.show_requested.swap(false, Ordering::SeqCst) {
-            self.show_popup(&ctx);
+            self.show_popup(ctx);
         }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
 
         if !self.visible {
             return;
@@ -411,8 +437,15 @@ impl eframe::App for PopupApp {
             return;
         }
 
-        // Dismiss when the popup loses focus (click-away / alt-tab).
-        if ctx.input(|i| i.viewport().focused == Some(false)) {
+        // Dismiss when the popup loses focus (click-away / alt-tab) — but only
+        // once it has actually gained focus. Otherwise the popup would hide
+        // itself on the first frame after being shown, before the window
+        // manager has granted focus to this undecorated window.
+        let focused = ctx.input(|i| i.viewport().focused);
+        if focused == Some(true) {
+            self.focused_once = true;
+        }
+        if self.focused_once && focused == Some(false) {
             self.hide_popup(&ctx);
             return;
         }

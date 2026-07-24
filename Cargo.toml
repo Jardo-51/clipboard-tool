@@ -6,12 +6,17 @@ description = "Lightweight cross-platform clipboard history manager"
 
 [dependencies]
 arboard = "3.6.1"
+auto-launch = "0.6.0"
 clipboard-master = "4.0.0"
 eframe = "0.35.0"
 egui = "0.35.0"
 enigo = "0.6.1"
 global-hotkey = "0.8.0"
-# versions filled in by `cargo add` inside the nix dev shell
+tray-icon = "0.24.1"
+
+# The tray needs a GTK main loop on Linux; matches the gtk version tray-icon/muda use.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
 
 [profile.release]
 opt-level = "z"     # optimize for size (resource-efficient goal)

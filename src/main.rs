@@ -9,8 +9,10 @@
 // Hide the console window on Windows in release builds.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
+mod autostart;
 mod history;
 mod platform;
+mod tray;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -41,6 +43,11 @@ struct Shared {
 }
 
 fn main() -> eframe::Result<()> {
+    // Handle one-shot CLI commands (autostart management) before launching the UI.
+    if let Some(code) = run_cli() {
+        std::process::exit(code);
+    }
+
     let shared = Arc::new(Shared {
         history: Mutex::new(HistoryStore::new(HISTORY_CAPACITY)),
         show_requested: AtomicBool::new(false),
@@ -75,9 +82,11 @@ fn main() -> eframe::Result<()> {
         "clipboard-tool",
         native_options,
         Box::new(move |cc| {
-            // Wake the event loop whenever a hotkey fires, even while hidden.
             let ctx = cc.egui_ctx.clone();
+
+            // Wake the event loop whenever a hotkey fires, even while hidden.
             let shared_for_hotkeys = shared.clone();
+            let ctx_for_hotkeys = ctx.clone();
             std::thread::spawn(move || {
                 let receiver = GlobalHotKeyEvent::receiver();
                 while let Ok(event) = receiver.recv() {
@@ -85,10 +94,13 @@ fn main() -> eframe::Result<()> {
                         && event.state == global_hotkey::HotKeyState::Pressed
                     {
                         shared_for_hotkeys.show_requested.store(true, Ordering::SeqCst);
-                        ctx.request_repaint();
+                        ctx_for_hotkeys.request_repaint();
                     }
                 }
             });
+
+            // Tray icon (its own GTK loop on Linux; no-op elsewhere for now).
+            tray::spawn(shared.clone(), ctx.clone());
 
             Ok(Box::new(PopupApp::new(shared.clone())))
         }),
@@ -96,6 +108,62 @@ fn main() -> eframe::Result<()> {
 
     drop(manager);
     Ok(())
+}
+
+/// Handle one-shot command-line subcommands. Returns `Some(exit_code)` if a
+/// command was handled and the process should exit, or `None` to launch the UI.
+fn run_cli() -> Option<i32> {
+    let arg = std::env::args().nth(1)?;
+    match arg.as_str() {
+        "--enable-autostart" => Some(match autostart::enable() {
+            Ok(()) => {
+                println!("Autostart enabled.");
+                0
+            }
+            Err(e) => {
+                eprintln!("Failed to enable autostart: {e}");
+                1
+            }
+        }),
+        "--disable-autostart" => Some(match autostart::disable() {
+            Ok(()) => {
+                println!("Autostart disabled.");
+                0
+            }
+            Err(e) => {
+                eprintln!("Failed to disable autostart: {e}");
+                1
+            }
+        }),
+        "--autostart-status" => {
+            println!(
+                "Autostart is {}.",
+                if autostart::is_enabled() {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            Some(0)
+        }
+        "--help" | "-h" => {
+            println!(
+                "clipboard-tool — clipboard history manager\n\n\
+                 Run with no arguments to start the background daemon and tray.\n\
+                 Press Ctrl+Shift+V to open the history popup.\n\n\
+                 Commands:\n  \
+                 --enable-autostart    Start automatically on login\n  \
+                 --disable-autostart   Stop starting on login\n  \
+                 --autostart-status    Show whether autostart is enabled\n  \
+                 --help, -h            Show this help"
+            );
+            Some(0)
+        }
+        other => {
+            eprintln!("Unknown argument: {other}\nRun with --help for usage.");
+            Some(2)
+        }
+    }
 }
 
 /// Spawns a thread that watches the OS clipboard and appends text changes to

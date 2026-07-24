@@ -71,7 +71,19 @@ nix build
 
 # or install into your profile
 nix profile install .
+
+# update after pulling/making code changes
+nix profile upgrade clipboard-tool
+
+# remove
+nix profile remove clipboard-tool
 ```
+
+Once installed into your profile, `clipboard-tool` is on your `PATH`
+(`~/.nix-profile/bin`) and can be launched from any directory by just typing
+`clipboard-tool` — it needs a graphical session (Wayland/X). The wrapped binary
+carries its own GL/Vulkan driver environment, so the popup renders outside the
+dev shell too.
 
 Without Nix, a standard `cargo build --release` works too, provided the native
 dev libraries are present (see `flake.nix` for the exact list: X11/Wayland/GL,

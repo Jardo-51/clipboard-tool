@@ -18,14 +18,15 @@ impl HistoryStore {
 
     /// Record a newly copied value. Ignores empties; de-duplicates by moving an
     /// existing identical entry to the front instead of adding a second copy.
-    pub fn push(&mut self, value: String) {
+    /// Returns `true` if the stored contents/order changed.
+    pub fn push(&mut self, value: String) -> bool {
         if value.is_empty() {
-            return;
+            return false;
         }
         if let Some(pos) = self.items.iter().position(|v| v == &value) {
-            // Already present — promote to most-recent.
+            // Already present — promote to most-recent (no-op if already first).
             if pos == 0 {
-                return;
+                return false;
             }
             self.items.remove(pos);
         }
@@ -33,6 +34,7 @@ impl HistoryStore {
         while self.items.len() > self.capacity {
             self.items.pop_back();
         }
+        true
     }
 
     pub fn get(&self, index: usize) -> Option<&String> {
@@ -51,6 +53,17 @@ impl HistoryStore {
 
     pub fn iter(&self) -> impl Iterator<Item = &String> {
         self.items.iter()
+    }
+
+    /// Newest-first copy of the items, for persistence.
+    pub fn snapshot(&self) -> Vec<String> {
+        self.items.iter().cloned().collect()
+    }
+
+    /// Replace the contents with a previously saved (newest-first) list,
+    /// truncated to the current capacity.
+    pub fn restore(&mut self, items: Vec<String>) {
+        self.items = items.into_iter().take(self.capacity).collect();
     }
 
     #[allow(dead_code)] // used by the tray "clear history" action in Phase 6

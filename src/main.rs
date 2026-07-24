@@ -10,36 +10,45 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod autostart;
+mod config;
 mod history;
+mod persist;
 mod platform;
 mod tray;
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use global_hotkey::{
-    hotkey::{Code, HotKey, Modifiers},
-    GlobalHotKeyEvent, GlobalHotKeyManager,
-};
+use config::Config;
+
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 
 use history::HistoryStore;
 
-const HISTORY_CAPACITY: usize = 100;
 const POPUP_WIDTH: f32 = 460.0;
 const POPUP_HEIGHT: f32 = 340.0;
 /// Grace period after hiding the popup before synthesizing the paste, so the
 /// OS can return focus to the previously active window.
 const FOCUS_RETURN_DELAY: Duration = Duration::from_millis(120);
+/// How often the background thread flushes a dirty history to disk.
+const PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Shared application state between the clipboard-watcher thread, the
-/// hotkey-listener thread, and the egui UI thread.
+/// hotkey-listener thread, the tray thread, and the egui UI thread.
 struct Shared {
     history: Mutex<HistoryStore>,
-    /// Set by the hotkey thread; consumed by the UI to show the popup.
+    /// Set by the hotkey/tray threads; consumed by the UI to show the popup.
     show_requested: AtomicBool,
     /// Backend that pastes a chosen item into the focused window.
     injector: Box<dyn platform::InputInjector>,
+    /// Set whenever the history changes; drives throttled persistence.
+    dirty: AtomicBool,
+    /// Whether history should be saved to disk at all.
+    persist: bool,
+    /// Where the history JSON lives (None if no data dir is available).
+    history_path: Option<PathBuf>,
 }
 
 fn main() -> eframe::Result<()> {
@@ -48,22 +57,41 @@ fn main() -> eframe::Result<()> {
         std::process::exit(code);
     }
 
+    let config = Config::load();
+    let history_path = if config.persist {
+        persist::history_path()
+    } else {
+        None
+    };
+
+    // Seed the history from disk when persistence is enabled.
+    let mut store = HistoryStore::new(config.history_size);
+    if let Some(path) = &history_path {
+        store.restore(persist::load(path));
+    }
+
     let shared = Arc::new(Shared {
-        history: Mutex::new(HistoryStore::new(HISTORY_CAPACITY)),
+        history: Mutex::new(store),
         show_requested: AtomicBool::new(false),
         injector: platform::default_injector(),
+        dirty: AtomicBool::new(false),
+        persist: config.persist,
+        history_path,
     });
 
     // --- Clipboard watcher (Phase 2) -------------------------------------
     spawn_clipboard_watcher(shared.clone());
 
-    // --- Global hotkey: Ctrl+Shift+V (Phase 1) ---------------------------
+    // --- Throttled history persistence (Phase 7) -------------------------
+    spawn_persistence(shared.clone());
+
+    // --- Global hotkey (Phase 1, configurable in Phase 7) ----------------
     // The manager must outlive the program, so keep it alive on the stack.
     let manager = GlobalHotKeyManager::new().expect("failed to init global hotkey manager");
-    let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyV);
+    let hotkey = config.parse_hotkey();
     manager
         .register(hotkey)
-        .expect("failed to register Ctrl+Shift+V");
+        .expect("failed to register global hotkey");
     let hotkey_id = hotkey.id();
 
     // --- egui popup ------------------------------------------------------
@@ -77,6 +105,10 @@ fn main() -> eframe::Result<()> {
             .with_visible(false),
         ..Default::default()
     };
+
+    // Kept for a best-effort flush if the event loop ever returns; the closure
+    // takes ownership of `shared`.
+    let shared_main = shared.clone();
 
     eframe::run_native(
         "clipboard-tool",
@@ -107,7 +139,41 @@ fn main() -> eframe::Result<()> {
     )?;
 
     drop(manager);
+    save_history(&shared_main); // best-effort flush if the loop ever returns
     Ok(())
+}
+
+/// Persist the current history to disk if persistence is enabled. Cheap and
+/// safe to call from any thread (used by the timer, the tray "Clear", and quit).
+fn save_history(shared: &Shared) {
+    if !shared.persist {
+        return;
+    }
+    let Some(path) = &shared.history_path else {
+        return;
+    };
+    let items = shared
+        .history
+        .lock()
+        .map(|h| h.snapshot())
+        .unwrap_or_default();
+    if let Err(e) = persist::save(path, &items) {
+        eprintln!("failed to save history to {}: {e}", path.display());
+    }
+}
+
+/// Flush a dirty history to disk at a low frequency, so frequent copies don't
+/// each trigger a write.
+fn spawn_persistence(shared: Arc<Shared>) {
+    if !shared.persist {
+        return;
+    }
+    std::thread::spawn(move || loop {
+        std::thread::sleep(PERSIST_INTERVAL);
+        if shared.dirty.swap(false, Ordering::SeqCst) {
+            save_history(&shared);
+        }
+    });
 }
 
 /// Handle one-shot command-line subcommands. Returns `Some(exit_code)` if a
@@ -179,8 +245,14 @@ fn spawn_clipboard_watcher(shared: Arc<Shared>) {
     impl ClipboardHandler for Handler {
         fn on_clipboard_change(&mut self) -> CallbackResult {
             if let Ok(text) = self.clipboard.get_text() {
-                if let Ok(mut hist) = self.shared.history.lock() {
-                    hist.push(text);
+                let changed = self
+                    .shared
+                    .history
+                    .lock()
+                    .map(|mut hist| hist.push(text))
+                    .unwrap_or(false);
+                if changed {
+                    self.shared.dirty.store(true, Ordering::SeqCst);
                 }
             }
             CallbackResult::Next

@@ -81,6 +81,7 @@ pub fn spawn(shared: Arc<Shared>, ctx: egui::Context) {
                     if let Ok(mut h) = shared.history.lock() {
                         h.clear();
                     }
+                    shared.dirty.store(true, Ordering::SeqCst);
                 } else if id == &autostart_id {
                     match crate::autostart::toggle() {
                         Ok(now) => autostart_item.set_checked(now),
@@ -90,6 +91,7 @@ pub fn spawn(shared: Arc<Shared>, ctx: egui::Context) {
                         }
                     }
                 } else if id == &quit_id {
+                    crate::save_history(&shared);
                     std::process::exit(0);
                 }
             }

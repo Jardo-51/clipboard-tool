@@ -9,7 +9,13 @@ arboard = "3.6.1"
 auto-launch = "0.6.0"
 clipboard-master = "4.0.0"
 dirs = "6.0.0"
-eframe = "0.35.0"
+# default-features disabled to drop the `accesskit` feature: on Linux its
+# `accesskit_unix` thread opens a zbus connection with no Tokio runtime, and
+# because `ashpd` unifies zbus onto its `tokio` feature process-wide, that
+# thread panics at startup ("there is no reactor running"). With panic=abort in
+# release this aborts the whole app. We don't need AT-SPI for this popup, so we
+# re-list eframe's other defaults minus accesskit (web_screen_reader is web-only).
+eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "wayland", "wgpu", "x11"] }
 egui = "0.35.0"
 # `wayland` enables the virtual-keyboard injection backend (wlroots: Sway/Hyprland);
 # enigo auto-selects X11 vs Wayland at runtime.

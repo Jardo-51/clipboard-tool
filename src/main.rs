@@ -350,6 +350,11 @@ struct PopupApp {
     /// window manager has granted focus, so the popup doesn't hide itself on
     /// the very frame it appears (before focus lands).
     focused_once: bool,
+    /// Set when the selection moves (or the popup opens); cleared once the
+    /// scroll area has followed it. Scrolling to the selection on *every* frame
+    /// instead re-centers the list continuously and swallows the mouse wheel,
+    /// which is the only way to reach rows far from the selection.
+    scroll_to_selection: bool,
 }
 
 impl PopupApp {
@@ -360,6 +365,7 @@ impl PopupApp {
             visible: false,
             initialized: false,
             focused_once: false,
+            scroll_to_selection: false,
         }
     }
 
@@ -367,6 +373,7 @@ impl PopupApp {
         self.visible = true;
         self.selected = 0;
         self.focused_once = false;
+        self.scroll_to_selection = true;
         center_on_screen(ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -460,9 +467,11 @@ impl eframe::App for PopupApp {
             if len > 0 {
                 if i.key_pressed(egui::Key::ArrowDown) {
                     self.selected = (self.selected + 1) % len;
+                    self.scroll_to_selection = true;
                 }
                 if i.key_pressed(egui::Key::ArrowUp) {
                     self.selected = (self.selected + len - 1) % len;
+                    self.scroll_to_selection = true;
                 }
             }
         });
@@ -505,11 +514,14 @@ impl eframe::App for PopupApp {
                     self.selected = idx;
                     commit = true;
                 }
-                if selected {
+                // Only follow the selection when it actually moved, so the
+                // mouse wheel isn't fighting a re-center every frame.
+                if selected && self.scroll_to_selection {
                     resp.scroll_to_me(Some(egui::Align::Center));
                 }
             }
         });
+        self.scroll_to_selection = false;
 
         if commit {
             self.commit_selection(&ctx, items.get(self.selected).cloned());

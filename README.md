@@ -69,6 +69,47 @@ useful (GitHub applies it automatically).
 
 With [direnv](https://direnv.net/): `direnv allow` auto-enters the shell.
 
+### Which build do I want?
+
+**`nix build` is for packaging, not for iterating.** It compiles in a sandbox with
+no access to `target/`, and nix caches whole derivations rather than object files,
+so *every* source change recompiles everything — all dependencies included, at
+`lto = true` / `codegen-units = 1`. There is no "second build is fast". Don't reach
+for it just to try out a code change.
+
+| Goal | Command |
+|---|---|
+| Edit → run → repeat | `nix develop -c cargo run` |
+| Daily driver, still iterating | `cargo build --release` + the launcher below |
+| Installing to your profile, or after editing `flake.nix` | `nix build` / `nix profile upgrade` |
+
+The only thing `nix build` gives the binary that cargo doesn't is the **runtime
+environment**: `LD_LIBRARY_PATH` plus the Mesa GL/Vulkan variables, which
+`wrapProgram` bakes into `result/bin/clipboard-tool` (hence that one runs from
+anywhere). A binary in `target/` is the same code *without* that, so it has to be
+started from the dev shell — outside it, wgpu finds the host's drivers instead of
+nix's and the popup dies with `FailedToCreateSurfaceForAnyBackend`.
+
+You can hand it that environment yourself and keep cargo's speed:
+
+```sh
+#!/bin/sh
+# ~/bin/clipboard-tool — fast rebuilds, launchable from anywhere
+DIR=/path/to/clipboard-tool
+export CLIPBOARD_TOOL_EXE="$0"
+exec nix develop "$DIR" -c "$DIR/target/release/clipboard-tool" "$@"
+```
+
+`nix develop -c` costs ~0.4s at startup, which is irrelevant for a daemon launched
+once at login. The `CLIPBOARD_TOOL_EXE="$0"` line matters: without it
+`--enable-autostart` writes the bare `target/release` binary into the `.desktop`
+entry, and *that* starts with no environment and fails as above (see
+[Autostart](#autostart)).
+
+Note that `target/release` still uses the size-optimized profile
+(`opt-level = "z"`, LTO, one codegen unit), so it is much slower to link than a
+debug build — just nowhere near a cold `nix build`.
+
 ### Install as a package
 
 ```bash

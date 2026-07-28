@@ -96,12 +96,7 @@ fn main() -> eframe::Result<()> {
     let hotkey_manager = if use_portal_hotkey {
         None
     } else {
-        let manager = GlobalHotKeyManager::new().expect("failed to init global hotkey manager");
-        let hotkey = config.parse_hotkey();
-        manager
-            .register(hotkey)
-            .expect("failed to register global hotkey");
-        Some((manager, hotkey.id()))
+        register_global_hotkey(&config)
     };
     let hotkey_id = hotkey_manager.as_ref().map(|(_, id)| *id);
 
@@ -160,6 +155,45 @@ fn main() -> eframe::Result<()> {
     drop(hotkey_manager);
     save_history(&shared_main); // best-effort flush if the loop ever returns
     Ok(())
+}
+
+/// Register the configured hotkey with the OS, returning the manager (which
+/// must be kept alive for the grab to hold) and the hotkey's event id.
+///
+/// A failed grab is an expected outcome, not a bug: `Ctrl+Shift+V` is claimed by
+/// several clipboard managers and desktop-level shortcuts, and X11's
+/// `XGrabKey` refuses a second client with `BadAccess`. Rather than abort the
+/// process — which under `panic = "abort"` means a silent `SIGABRT` and no tray
+/// icon — degrade the same way the Wayland portal path does: warn, return
+/// `None`, and let the user open the popup from the tray.
+fn register_global_hotkey(config: &Config) -> Option<(GlobalHotKeyManager, u32)> {
+    let where_to_configure = Config::config_path()
+        .map(|p| format!(" or pick a different `hotkey` in {}", p.display()))
+        .unwrap_or_default();
+
+    let manager = match GlobalHotKeyManager::new() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!(
+                "hotkey: could not initialize the global hotkey manager ({e}). \
+                 Open the popup from the tray icon's \"Show history\" instead."
+            );
+            return None;
+        }
+    };
+
+    let hotkey = config.parse_hotkey();
+    if let Err(e) = manager.register(hotkey) {
+        eprintln!(
+            "hotkey: could not register '{}' ({e}) — another application most \
+             likely already holds that combination. Open the popup from the tray \
+             icon's \"Show history\" instead{where_to_configure}.",
+            config.hotkey
+        );
+        return None;
+    }
+
+    Some((manager, hotkey.id()))
 }
 
 /// Persist the current history to disk if persistence is enabled. Cheap and

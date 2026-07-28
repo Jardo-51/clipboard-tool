@@ -35,6 +35,8 @@ const POPUP_HEIGHT: f32 = 340.0;
 const FOCUS_RETURN_DELAY: Duration = Duration::from_millis(120);
 /// How often the background thread flushes a dirty history to disk.
 const PERSIST_INTERVAL: Duration = Duration::from_secs(5);
+/// Longest preview line shown per history row, in characters.
+const PREVIEW_MAX_CHARS: usize = 80;
 
 /// Shared application state between the clipboard-watcher thread, the
 /// hotkey-listener thread, the tray thread, and the egui UI thread.
@@ -515,16 +517,31 @@ impl eframe::App for PopupApp {
     }
 }
 
-/// Collapse a clipboard entry to a single trimmed preview line for the menu.
+/// Collapse a clipboard entry to a single trimmed preview line for the popup.
+///
+/// Builds the line lazily and stops at [`PREVIEW_MAX_CHARS`]. Flattening the
+/// whole entry first would mean walking (and copying) a multi-megabyte clipboard
+/// item to keep 80 characters of it, once per visible row per frame.
 fn one_line_preview(s: &str) -> String {
-    const MAX: usize = 80;
-    let flat: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() > MAX {
-        let truncated: String = flat.chars().take(MAX).collect();
-        format!("{truncated}…")
-    } else {
-        flat
+    let mut out = String::with_capacity(PREVIEW_MAX_CHARS + 4);
+    let mut chars = 0usize;
+
+    for word in s.split_whitespace() {
+        let separator = if chars == 0 { "" } else { " " };
+        for c in separator.chars().chain(word.chars()) {
+            if chars == PREVIEW_MAX_CHARS {
+                // More content than fits — mark it and stop reading the rest.
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push('…');
+                return out;
+            }
+            out.push(c);
+            chars += 1;
+        }
     }
+    out
 }
 
 /// Position the popup in the middle of the primary monitor.
@@ -536,5 +553,56 @@ fn center_on_screen(ctx: &egui::Context) {
             ((size.y - POPUP_HEIGHT) / 2.0).max(0.0),
         );
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_collapses_whitespace() {
+        assert_eq!(one_line_preview("  a\n\tb   c  "), "a b c");
+        assert_eq!(one_line_preview(""), "");
+        assert_eq!(one_line_preview(" \n\t "), "");
+    }
+
+    #[test]
+    fn preview_keeps_exactly_max_chars_untruncated() {
+        let s = "a".repeat(PREVIEW_MAX_CHARS);
+        let preview = one_line_preview(&s);
+        assert_eq!(preview, s);
+        assert!(!preview.ends_with('…'));
+    }
+
+    #[test]
+    fn preview_truncates_one_char_over_max() {
+        let preview = one_line_preview(&"a".repeat(PREVIEW_MAX_CHARS + 1));
+        assert_eq!(preview, format!("{}…", "a".repeat(PREVIEW_MAX_CHARS)));
+    }
+
+    #[test]
+    fn preview_truncates_on_char_boundaries() {
+        // Multi-byte input: truncation must count characters, not bytes, and
+        // must not split one. (Slicing by byte index here would panic.)
+        let preview = one_line_preview(&"é".repeat(PREVIEW_MAX_CHARS * 2));
+        assert_eq!(preview.chars().count(), PREVIEW_MAX_CHARS + 1);
+        assert!(preview.starts_with(&"é".repeat(PREVIEW_MAX_CHARS)));
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn preview_does_not_leave_a_space_before_the_ellipsis() {
+        // Truncating exactly at a word separator shouldn't render "word …".
+        let s = format!("{} tail", "a".repeat(PREVIEW_MAX_CHARS - 1));
+        let preview = one_line_preview(&s);
+        assert_eq!(preview, format!("{}…", "a".repeat(PREVIEW_MAX_CHARS - 1)));
+    }
+
+    #[test]
+    fn preview_of_a_huge_entry_stays_bounded() {
+        let huge = "lorem ipsum ".repeat(500_000); // ~6 MB
+        let preview = one_line_preview(&huge);
+        assert_eq!(preview.chars().count(), PREVIEW_MAX_CHARS + 1);
     }
 }

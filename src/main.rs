@@ -1,10 +1,16 @@
 //! clipboard-tool — lightweight cross-platform clipboard history manager.
 //!
-//! Phase 1–2 milestone: a background clipboard watcher records copied text into
-//! a capped history, and a global Ctrl+Shift+V shows a centered egui popup
-//! listing recent items (arrow keys navigate, Enter selects, Esc dismisses).
-//! Selection currently copies back to the clipboard; synthetic paste injection
-//! (enigo) lands in Phase 4.
+//! A background thread watches the OS clipboard and records copied text into a
+//! capped, de-duplicating history. A global hotkey (`Ctrl+Shift+V` by default)
+//! shows a centered egui popup of the recent items: arrow keys navigate, Enter
+//! puts the chosen entry back on the clipboard and synthesizes a paste into the
+//! window that had focus, Esc or clicking away dismisses it. A tray icon offers
+//! the same actions, and the history is restored across restarts unless
+//! `persist` is turned off in `config.toml`.
+//!
+//! This module owns the shared state and the wiring between those threads; the
+//! pieces live in [`history`], [`persist`], [`config`], [`tray`], [`autostart`],
+//! [`wayland`] and [`platform`].
 
 // Hide the console window on Windows in release builds.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
@@ -82,13 +88,13 @@ fn main() -> eframe::Result<()> {
         history_path,
     });
 
-    // --- Clipboard watcher (Phase 2) -------------------------------------
+    // --- Clipboard watcher ------------------------------------------------
     spawn_clipboard_watcher(shared.clone());
 
-    // --- Throttled history persistence (Phase 7) -------------------------
+    // --- Throttled history persistence -------------------------------------
     spawn_persistence(shared.clone());
 
-    // --- Global hotkey (Phase 1/7; Wayland portal backend in Phase 5) ----
+    // --- Global hotkey -----------------------------------------------------
     // On X11/Windows/macOS use the `global-hotkey` key grab. On Wayland that
     // doesn't work, so we use the GlobalShortcuts portal instead.
     let use_portal_hotkey = platform::detect_session() == platform::SessionType::Wayland;

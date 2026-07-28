@@ -8,6 +8,11 @@
 //! directory is tightened to `0700`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Distinguishes concurrent temp files within one process; the pid separates
+/// them across processes.
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub fn history_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("clipboard-tool").join("history.json"))
@@ -22,18 +27,54 @@ pub fn load(path: &Path) -> Vec<String> {
     }
 }
 
-/// Save the history (newest-first) via a temp-file + rename so a crash mid-write
-/// can't corrupt the existing file.
+/// Save the history (newest-first) via a temp-file + rename, so an interrupted
+/// write can't corrupt the existing file.
+///
+/// The temp name is unique per call: `save` has several callers that can run
+/// concurrently (the periodic flush thread and the tray's Quit handler), and a
+/// shared temp path would let one writer truncate the file another is about to
+/// rename into place. Both the temp file and the parent directory are fsynced,
+/// so the guarantee holds for power loss and not just for a process crash.
+///
+/// Concurrent saves are still last-rename-wins; each writes a complete, valid
+/// file, so the worst case is a slightly stale history rather than a corrupt one.
 pub fn save(path: &Path, items: &[String]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         restrict_dir(parent);
     }
     let json = serde_json::to_string(items)?;
-    let tmp = path.with_extension("json.tmp");
-    write_private(&tmp, json.as_bytes())?;
-    std::fs::rename(&tmp, path)?;
+    let tmp = path.with_extension(format!(
+        "json.{}.{}.tmp",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    if let Err(e) = write_private(&tmp, json.as_bytes()).and_then(|()| std::fs::rename(&tmp, path)) {
+        // Unique names don't self-clean the way a fixed one did.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // Durably record the new directory entry, so a crash after this returns
+    // can't leave the rename unapplied.
+    sync_dir(path.parent());
     Ok(())
+}
+
+/// Best-effort fsync of a directory, which is what makes a rename durable on
+/// Unix. Not meaningful on Windows, where directories can't be opened this way.
+fn sync_dir(dir: Option<&Path>) {
+    #[cfg(unix)]
+    if let Some(dir) = dir {
+        if let Ok(handle) = std::fs::File::open(dir) {
+            let _ = handle.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+    }
 }
 
 /// Write `bytes` to `path`, creating the file owner-only (`0600`) on Unix.
@@ -56,11 +97,16 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             .mode(0o600)
             .open(path)?;
         f.write_all(bytes)?;
-        Ok(())
+        // Get the contents on disk before the rename publishes the name.
+        f.sync_all()
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(path, bytes)
+        use std::io::Write;
+
+        let mut f = std::fs::File::create(path)?;
+        f.write_all(bytes)?;
+        f.sync_all()
     }
 }
 
@@ -113,6 +159,40 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "history.json must not be group/world readable");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn concurrent_saves_never_corrupt() {
+        let dir =
+            std::env::temp_dir().join(format!("clipboard-tool-concurrent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+
+        // A shared temp path let one writer truncate the file another was about
+        // to rename into place, leaving the destination empty or partial.
+        std::thread::scope(|s| {
+            for n in 0..8 {
+                let path = path.clone();
+                s.spawn(move || {
+                    let items: Vec<String> = (0..50).map(|i| format!("thread {n} item {i}")).collect();
+                    for _ in 0..20 {
+                        save(&path, &items).unwrap();
+                        // Every observed state must be a complete history.
+                        assert_eq!(load(&path).len(), items.len());
+                    }
+                });
+            }
+        });
+
+        // Unique temp names must not accumulate.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

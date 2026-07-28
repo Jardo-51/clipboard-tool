@@ -42,12 +42,6 @@ pub trait InputInjector: Send + Sync {
 /// Works on X11, Windows, macOS, and — experimentally — Wayland via libei.
 pub struct EnigoInjector;
 
-impl EnigoInjector {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 impl InputInjector for EnigoInjector {
     fn paste(&self, text: &str) -> Result<(), String> {
         // 1. Set the clipboard. Keep the handle alive until after the keystroke

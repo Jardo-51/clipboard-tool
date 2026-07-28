@@ -15,7 +15,7 @@ pub use inject::InputInjector;
 /// Every platform currently uses the `enigo`-based backend; a Wayland-specific
 /// (libei) branch would go here.
 pub fn default_injector() -> Box<dyn InputInjector> {
-    Box::new(inject::EnigoInjector::new())
+    Box::new(inject::EnigoInjector)
 }
 
 /// Detected Linux session type, used to pick backends. Harmless on non-Linux

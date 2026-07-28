@@ -11,6 +11,20 @@ const PASTE_MODIFIER: Key = Key::Meta;
 #[cfg(not(target_os = "macos"))]
 const PASTE_MODIFIER: Key = Key::Control;
 
+/// Modifiers released before the paste is synthesized — every modifier except
+/// [`PASTE_MODIFIER`].
+///
+/// The user may still be physically holding part of the hotkey when this runs:
+/// the popup hides and pastes after `FOCUS_RETURN_DELAY` (120ms), comfortably
+/// inside a normal keypress. A `Shift` left down turns our `Ctrl+V` into
+/// `Ctrl+Shift+V`, which is a *different* command in GNOME Terminal, Konsole,
+/// VS Code and most browsers — so nothing gets pasted, and the synthesis
+/// reports success because it did exactly what it was told.
+#[cfg(target_os = "macos")]
+const STRAY_MODIFIERS: [Key; 3] = [Key::Shift, Key::Alt, Key::Control];
+#[cfg(not(target_os = "macos"))]
+const STRAY_MODIFIERS: [Key; 3] = [Key::Shift, Key::Alt, Key::Meta];
+
 /// How long to keep owning the X11 selection after issuing the keystroke, so
 /// the target window can read the pasted data before we relinquish ownership.
 const SELECTION_GRACE: Duration = Duration::from_millis(150);
@@ -47,6 +61,14 @@ impl InputInjector for EnigoInjector {
         // 2. Synthesize the paste shortcut into the focused window.
         let mut enigo = Enigo::new(&Settings::default())
             .map_err(|e| format!("input backend unavailable: {e}"))?;
+
+        // Drop any modifier the user is still holding from the hotkey, so the
+        // target sees exactly the paste shortcut. Releasing a modifier that
+        // isn't down is a no-op.
+        for modifier in STRAY_MODIFIERS {
+            let _ = enigo.key(modifier, Direction::Release);
+        }
+
         enigo
             .key(PASTE_MODIFIER, Direction::Press)
             .map_err(|e| e.to_string())?;

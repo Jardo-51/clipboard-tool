@@ -99,7 +99,17 @@ pub fn to_portal_trigger(hotkey: &str) -> Option<String> {
                 if key.is_empty() {
                     return None;
                 }
-                key.to_ascii_lowercase()
+                // The portal's key component is an XKB keysym name, and those
+                // are case-sensitive: `F5`, `Return`, `Tab`, `Escape` are not
+                // valid as `f5`, `return`, … A compositor given an invalid
+                // keysym quietly ignores the preferred trigger, leaving the
+                // user to bind it by hand with nothing in the log to explain
+                // why. Only the single-character keys are lowercase keysyms.
+                if key.chars().count() == 1 {
+                    key.to_ascii_lowercase()
+                } else {
+                    key.to_string()
+                }
             }
         };
         parts.push(mapped);
@@ -140,7 +150,24 @@ mod tests {
     }
 
     #[test]
-    fn passes_through_bare_key() {
-        assert_eq!(to_portal_trigger("F5").as_deref(), Some("f5"));
+    fn preserves_named_keysym_case() {
+        // Keysym names are case-sensitive; "f5" is not a keysym.
+        assert_eq!(to_portal_trigger("F5").as_deref(), Some("F5"));
+        assert_eq!(
+            to_portal_trigger("ctrl+Return").as_deref(),
+            Some("CTRL+Return")
+        );
+        assert_eq!(
+            to_portal_trigger("alt+Escape").as_deref(),
+            Some("ALT+Escape")
+        );
+    }
+
+    #[test]
+    fn lowercases_only_single_character_keys() {
+        // "KeyV" -> "V" -> "v" is right; a named keysym must not be touched.
+        assert_eq!(to_portal_trigger("KeyV").as_deref(), Some("v"));
+        assert_eq!(to_portal_trigger("Digit1").as_deref(), Some("1"));
+        assert_eq!(to_portal_trigger("Tab").as_deref(), Some("Tab"));
     }
 }

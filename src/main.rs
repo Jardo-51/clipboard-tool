@@ -386,7 +386,7 @@ impl PopupApp {
     /// outright. Resolving `self.selected` against the store at this point would
     /// paste the neighbour of the highlighted item, or nothing at all. The
     /// caller resolves it against the snapshot it actually rendered.
-    fn commit_selection(&mut self, ctx: &egui::Context, chosen: Option<String>) {
+    fn commit_selection(&mut self, ctx: &egui::Context, chosen: Option<Arc<str>>) {
         // Hide first — the target app must regain focus before we paste.
         self.hide_popup(ctx);
 
@@ -434,8 +434,11 @@ impl eframe::App for PopupApp {
         }
 
         // Snapshot the history once per frame so the lock isn't held while we
-        // borrow `self` mutably during rendering.
-        let items: Vec<String> = self
+        // borrow `self` mutably during rendering. The store hands out `Arc<str>`
+        // precisely so this stays a few refcount bumps rather than a deep copy
+        // of every entry, which at frame rate would be ruinous for the large
+        // entries a clipboard routinely holds.
+        let items: Vec<Arc<str>> = self
             .shared
             .history
             .lock()

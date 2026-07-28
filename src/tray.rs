@@ -17,11 +17,11 @@ use crate::Shared;
 #[cfg(target_os = "linux")]
 pub fn spawn(shared: Arc<Shared>, ctx: egui::Context) {
     use std::sync::atomic::Ordering;
-    use std::time::Duration;
+    use std::sync::Mutex;
 
     use gtk::glib;
     use tray_icon::{
-        menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+        menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
         TrayIconBuilder,
     };
 
@@ -68,32 +68,51 @@ pub fn spawn(shared: Arc<Shared>, ctx: egui::Context) {
         let quit_id = quit_item.id().clone();
         let autostart_id = autostart_item.id().clone();
 
-        let menu_rx = MenuEvent::receiver();
-        // Poll menu events from within the GTK main loop (same thread, so the
-        // non-Send muda item handles are safe to touch here).
-        glib::timeout_add_local(Duration::from_millis(100), move || {
-            while let Ok(event) = menu_rx.try_recv() {
-                let id = event.id();
-                if id == &show_id {
-                    shared.show_requested.store(true, Ordering::SeqCst);
-                    ctx.request_repaint();
-                } else if id == &clear_id {
-                    if let Ok(mut h) = shared.history.lock() {
-                        h.clear();
-                    }
-                    shared.dirty.store(true, Ordering::SeqCst);
-                } else if id == &autostart_id {
-                    match crate::autostart::toggle() {
-                        Ok(now) => autostart_item.set_checked(now),
-                        Err(e) => {
-                            eprintln!("tray: autostart toggle failed: {e}");
-                            autostart_item.set_checked(crate::autostart::is_enabled());
-                        }
-                    }
-                } else if id == &quit_id {
-                    crate::save_history(&shared);
-                    std::process::exit(0);
+        // Menu events are delivered to a global handler, which muda may call
+        // from any thread. Forward the id through a glib channel: the send
+        // wakes the GTK main loop, and the receiving closure runs on this
+        // thread, so it can still touch the non-Send muda item handles.
+        //
+        // Polling instead — the obvious alternative — costs a wakeup every
+        // 100ms for the entire life of the daemon (~864k a day) to drain a
+        // queue that is empty except in the moments the user has the menu open,
+        // which is at odds with idling at rest.
+        //
+        // MainContext::channel is deprecated in favour of an async channel
+        // driven by spawn_future_local; that would mean taking on
+        // async-channel purely for this one wakeup path.
+        #[allow(deprecated)]
+        let (tx, rx) = glib::MainContext::channel::<MenuId>(glib::Priority::DEFAULT);
+
+        // The handler must be Sync; glib's Sender is only Send.
+        let tx = Mutex::new(tx);
+        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+            if let Ok(tx) = tx.lock() {
+                let _ = tx.send(event.id);
+            }
+        }));
+
+        #[allow(deprecated)]
+        rx.attach(None, move |id| {
+            if id == show_id {
+                shared.show_requested.store(true, Ordering::SeqCst);
+                ctx.request_repaint();
+            } else if id == clear_id {
+                if let Ok(mut h) = shared.history.lock() {
+                    h.clear();
                 }
+                shared.dirty.store(true, Ordering::SeqCst);
+            } else if id == autostart_id {
+                match crate::autostart::toggle() {
+                    Ok(now) => autostart_item.set_checked(now),
+                    Err(e) => {
+                        eprintln!("tray: autostart toggle failed: {e}");
+                        autostart_item.set_checked(crate::autostart::is_enabled());
+                    }
+                }
+            } else if id == quit_id {
+                crate::save_history(&shared);
+                std::process::exit(0);
             }
             glib::ControlFlow::Continue
         });

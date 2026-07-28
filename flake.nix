@@ -90,8 +90,14 @@
           # create a surface on a non-NixOS host too — otherwise the installed
           # binary hits the two-glibc driver problem the dev shell works around.
           # --set-default lets a NixOS host (with its own drivers) override.
+          #
+          # CLIPBOARD_TOOL_EXE points autostart at this wrapper: makeWrapper
+          # moves the real ELF to .clipboard-tool-wrapped, and the binary's own
+          # current_exe() resolves to that inner path, which would autostart an
+          # instance with none of the env below.
           postInstall = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
             wrapProgram $out/bin/clipboard-tool \
+              --set CLIPBOARD_TOOL_EXE $out/bin/clipboard-tool \
               --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath (libs ++ graphicsLibs)} \
               --set-default LIBGL_DRIVERS_PATH ${pkgs.mesa}/lib/dri \
               --set-default __EGL_VENDOR_LIBRARY_DIRS ${pkgs.mesa}/share/glvnd/egl_vendor.d \

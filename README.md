@@ -102,6 +102,11 @@ This registers the running executable as a login item: a
 `~/.config/autostart/*.desktop` entry on Linux, a `Run` registry value on
 Windows, and a LaunchAgent on macOS. You can also toggle it from the tray menu.
 
+Packagers: if your package puts a launcher script at the user-facing path (as
+the Nix package here does via `wrapProgram`), set `CLIPBOARD_TOOL_EXE` to that
+path. Autostart uses it in preference to `current_exe()`, which would otherwise
+resolve past the wrapper to the inner binary and start without its environment.
+
 ## Configuration
 
 A commented `config.toml` is created on first run in the platform config dir

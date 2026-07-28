@@ -32,7 +32,13 @@ pub fn spawn(shared: Arc<Shared>, ctx: egui::Context) {
         }
 
         let menu = Menu::new();
-        let show_item = MenuItem::new("Show history\t(Ctrl+Shift+V)", true, None);
+        // Only hint at a shortcut when one is actually registered, and use the
+        // configured one rather than a hardcoded Ctrl+Shift+V.
+        let show_label = match &shared.hotkey_label {
+            Some(hotkey) => format!("Show history\t({hotkey})"),
+            None => "Show history".to_string(),
+        };
+        let show_item = MenuItem::new(show_label, true, None);
         let autostart_item =
             CheckMenuItem::new("Start on login", true, crate::autostart::is_enabled(), None);
         let clear_item = MenuItem::new("Clear history", true, None);

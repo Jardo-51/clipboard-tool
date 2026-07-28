@@ -58,6 +58,9 @@ struct Shared {
     persist: bool,
     /// Where the history JSON lives (None if no data dir is available).
     history_path: Option<PathBuf>,
+    /// How to spell the active hotkey in the UI, or `None` when there isn't one
+    /// (so the tray doesn't advertise a shortcut that does nothing).
+    hotkey_label: Option<String>,
 }
 
 fn main() -> eframe::Result<()> {
@@ -79,21 +82,6 @@ fn main() -> eframe::Result<()> {
         store.restore(persist::load(path));
     }
 
-    let shared = Arc::new(Shared {
-        history: Mutex::new(store),
-        show_requested: AtomicBool::new(false),
-        injector: platform::default_injector(),
-        dirty: AtomicBool::new(false),
-        persist: config.persist,
-        history_path,
-    });
-
-    // --- Clipboard watcher ------------------------------------------------
-    spawn_clipboard_watcher(shared.clone());
-
-    // --- Throttled history persistence -------------------------------------
-    spawn_persistence(shared.clone());
-
     // --- Global hotkey -----------------------------------------------------
     // On X11/Windows/macOS use the `global-hotkey` key grab. On Wayland that
     // doesn't work, so we use the GlobalShortcuts portal instead.
@@ -107,6 +95,27 @@ fn main() -> eframe::Result<()> {
         register_global_hotkey(&config)
     };
     let hotkey_id = hotkey_manager.as_ref().map(|(_, id)| *id);
+
+    // Only name a shortcut in the UI if one is actually live. On the portal path
+    // the compositor may hand the user a different binding, so the configured
+    // one is a best-effort answer there.
+    let hotkey_label = (use_portal_hotkey || hotkey_manager.is_some()).then(|| config.hotkey_label());
+
+    let shared = Arc::new(Shared {
+        history: Mutex::new(store),
+        show_requested: AtomicBool::new(false),
+        injector: platform::default_injector(),
+        dirty: AtomicBool::new(false),
+        persist: config.persist,
+        history_path,
+        hotkey_label,
+    });
+
+    // --- Clipboard watcher ------------------------------------------------
+    spawn_clipboard_watcher(shared.clone());
+
+    // --- Throttled history persistence -------------------------------------
+    spawn_persistence(shared.clone());
 
     // --- egui popup ------------------------------------------------------
     let native_options = eframe::NativeOptions {
@@ -274,10 +283,12 @@ fn run_cli() -> Option<i32> {
             Some(0)
         }
         "--help" | "-h" => {
+            // Read-only load: printing help shouldn't create a config file.
+            let hotkey = Config::load_without_creating().hotkey_label();
             println!(
                 "clipboard-tool — clipboard history manager\n\n\
                  Run with no arguments to start the background daemon and tray.\n\
-                 Press Ctrl+Shift+V to open the history popup.\n\n\
+                 Press {hotkey} to open the history popup.\n\n\
                  Commands:\n  \
                  --enable-autostart    Start automatically on login\n  \
                  --disable-autostart   Stop starting on login\n  \

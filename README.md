@@ -53,7 +53,7 @@ nothing is installed system-wide.
 # enter the dev shell (first run downloads the toolchain)
 nix develop
 
-# run the daemon; then copy a few things and press Ctrl+Shift+V
+# run the daemon; then copy a few things and press Ctrl+Shift+V (the default)
 cargo run
 
 # tests / lints
@@ -126,6 +126,11 @@ persist = true
 
 - Missing fields fall back to defaults; a malformed file logs a warning and uses
   defaults rather than refusing to start.
+- The tray menu and `--help` show whichever hotkey is actually in effect, so a
+  customized `hotkey` is reflected there. If the combination can't be registered
+  (another application already holds it), the tray drops the hint rather than
+  advertising a shortcut that does nothing — open the popup from **Show
+  history** instead, or pick a different `hotkey`.
 - History is persisted to `~/.local/share/clipboard-tool/history.json` (Linux),
   written atomically (temp file + rename), flushed every few seconds when it
   changes and on quit.

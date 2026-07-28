@@ -46,6 +46,16 @@ impl Config {
     /// Load config, creating a default file if none exists. Malformed files
     /// fall back to defaults (with a warning) rather than aborting startup.
     pub fn load() -> Self {
+        Self::load_inner(true)
+    }
+
+    /// Load config without creating anything, for read-only callers such as
+    /// `--help` that shouldn't have side effects on the user's config dir.
+    pub fn load_without_creating() -> Self {
+        Self::load_inner(false)
+    }
+
+    fn load_inner(create_default: bool) -> Self {
         let Some(path) = Self::config_path() else {
             return Self::default();
         };
@@ -63,7 +73,9 @@ impl Config {
             // First run: no config yet, so seed one with the defaults.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let cfg = Self::default();
-                cfg.write_default(&path);
+                if create_default {
+                    cfg.write_default(&path);
+                }
                 cfg
             }
             // Anything else — a root-owned file, a hardened ~/.config, an
@@ -101,6 +113,43 @@ impl Config {
         }
     }
 
+    /// The hotkey string that will actually take effect: the configured one, or
+    /// the default when that doesn't parse (matching [`parse_hotkey`]).
+    ///
+    /// [`parse_hotkey`]: Self::parse_hotkey
+    fn effective_hotkey(&self) -> &str {
+        if self.hotkey.parse::<HotKey>().is_ok() {
+            &self.hotkey
+        } else {
+            DEFAULT_HOTKEY
+        }
+    }
+
+    /// Human-readable rendering of the effective hotkey ("Ctrl+Shift+V"), for
+    /// the tray menu and `--help`. The stored spelling ("ctrl+shift+KeyV") names
+    /// physical key codes and isn't meant to be shown to users verbatim.
+    pub fn hotkey_label(&self) -> String {
+        self.effective_hotkey()
+            .split('+')
+            .map(|token| {
+                let token = token.trim();
+                match token.to_ascii_lowercase().as_str() {
+                    "ctrl" | "control" => "Ctrl".to_string(),
+                    "shift" => "Shift".to_string(),
+                    "alt" | "option" => "Alt".to_string(),
+                    "super" | "meta" | "cmd" | "command" | "win" => "Super".to_string(),
+                    // "KeyV" -> "V", "Digit1" -> "1", "F5" -> "F5".
+                    _ => token
+                        .strip_prefix("Key")
+                        .or_else(|| token.strip_prefix("Digit"))
+                        .unwrap_or(token)
+                        .to_string(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+
     /// Parse the configured hotkey, falling back to the default on error.
     pub fn parse_hotkey(&self) -> HotKey {
         self.hotkey.parse::<HotKey>().unwrap_or_else(|e| {
@@ -132,6 +181,38 @@ mod tests {
         assert_eq!(cfg.history_size, 5);
         assert_eq!(cfg.hotkey, DEFAULT_HOTKEY);
         assert!(cfg.persist);
+    }
+
+    #[test]
+    fn hotkey_label_is_human_readable() {
+        assert_eq!(Config::default().hotkey_label(), "Ctrl+Shift+V");
+        assert_eq!(
+            Config {
+                hotkey: "super+KeyC".into(),
+                ..Config::default()
+            }
+            .hotkey_label(),
+            "Super+C"
+        );
+        assert_eq!(
+            Config {
+                hotkey: "alt+Digit1".into(),
+                ..Config::default()
+            }
+            .hotkey_label(),
+            "Alt+1"
+        );
+    }
+
+    #[test]
+    fn hotkey_label_reports_the_key_that_will_be_registered() {
+        // An unparsable hotkey falls back to the default, so advertising the
+        // configured string would name a shortcut that does nothing.
+        let cfg = Config {
+            hotkey: "not a hotkey".into(),
+            ..Config::default()
+        };
+        assert_eq!(cfg.hotkey_label(), Config::default().hotkey_label());
     }
 
     #[test]

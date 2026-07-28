@@ -71,34 +71,58 @@ With [direnv](https://direnv.net/): `direnv allow` auto-enters the shell.
 
 ### Which build do I want?
 
-**`nix build` is for packaging, not for iterating.** It compiles in a sandbox with
-no access to `target/`, and nix caches whole derivations rather than object files,
-so *every* source change recompiles everything — all dependencies included, at
-`lto = true` / `codegen-units = 1`. There is no "second build is fast". Don't reach
-for it just to try out a code change.
+Native dev libraries are required to be present on the machine. You can either:
 
-| Goal | Command |
-|---|---|
-| Edit → run → repeat | `nix develop -c cargo run` |
-| Daily driver, still iterating | `cargo build --release` + the launcher below |
-| Installing to your profile, or after editing `flake.nix` | `nix build` / `nix profile upgrade` |
+- use the project's Nix shell, which provides all required libraries
+(see `flake.nix` for the exact list: X11/Wayland/GL, `xdotool`/libxdo,
+GTK3 + libayatana-appindicator on Linux)
 
-The only thing `nix build` gives the binary that cargo doesn't is the **runtime
-environment**: `LD_LIBRARY_PATH` plus the Mesa GL/Vulkan variables, which
-`wrapProgram` bakes into `result/bin/clipboard-tool` (hence that one runs from
-anywhere). A binary in `target/` is the same code *without* that, so it has to be
-started from the dev shell — outside it, wgpu finds the host's drivers instead of
-nix's and the popup dies with `FailedToCreateSurfaceForAnyBackend`.
+or:
 
-You can hand it that environment yourself and keep cargo's speed:
+- skip Nix by droping the `nix develop -c` part from the commands below,
+in which case you need to ensure manually that you have the libraries installed —
+along with a Rust toolchain and `pkg-config`, which the dev shell also supplies.
+
+There are several options to build and run the app:
+
+#### Local development iteration/debugging
+
+Fastest build and run, creates an un-optimized binary suitable for debugging:
+
+```sh
+nix develop -c cargo run
+```
+
+#### Binary for regular usage
+
+Build an optimized binary for everyday use, build is slower than the first option, but still
+takes advantage of the Cargo cache, so it's not terrible:
+
+```sh
+nix develop -c cargo build --release
+```
+
+When building with Nix, the resulting binary in `target/release/` carries no runtime environment
+of its own: started outside the shell, wgpu finds the host's GL/Vulkan drivers instead of nix's
+and the popup dies with `FailedToCreateSurfaceForAnyBackend`.
+
+Therefore it either has to be run from the Nix dev shell:
+
+```sh
+nix develop -c target/release/clipboard-tool
+```
+
+Or you can create a small launcher script, which can be executed from anywhere (recommended):
 
 ```sh
 #!/bin/sh
 # ~/bin/clipboard-tool — fast rebuilds, launchable from anywhere
-DIR=/path/to/clipboard-tool
+DIR=/path/to/repository
 export CLIPBOARD_TOOL_EXE="$0"
 exec nix develop "$DIR" -c "$DIR/target/release/clipboard-tool" "$@"
 ```
+
+You can put this script in a directory on your `$PATH`.
 
 `nix develop -c` costs ~0.4s at startup, which is irrelevant for a daemon launched
 once at login. The `CLIPBOARD_TOOL_EXE="$0"` line matters: without it
@@ -106,11 +130,29 @@ once at login. The `CLIPBOARD_TOOL_EXE="$0"` line matters: without it
 entry, and *that* starts with no environment and fails as above (see
 [Autostart](#autostart)).
 
+A binary built entirely outside nix, against your own system libraries, runs directly
+(doesn't need the Nix shell or launcher script).
+
 Note that `target/release` still uses the size-optimized profile
 (`opt-level = "z"`, LTO, one codegen unit), so it is much slower to link than a
 debug build — just nowhere near a cold `nix build`.
 
-### Install as a package
+#### Install as a Nix package
+
+Slowest option to build, but needs nothing beyond Nix itself — no dev shell to enter,
+and nix supplies the same native libraries to the sandbox.
+
+**`nix build` is for packaging, not for iterating.** It compiles in a sandbox with
+no access to `target/`, and nix caches whole derivations rather than object files,
+so *every* source change recompiles everything — all dependencies included, at
+`lto = true` / `codegen-units = 1`. There is no "second build is fast". Don't reach
+for it just to try out a code change.
+
+The only thing `nix build` gives the binary that cargo doesn't is the **runtime
+environment**: `LD_LIBRARY_PATH` plus the Mesa GL/Vulkan variables, which
+`wrapProgram` bakes into `result/bin/clipboard-tool`. That is why this one runs from
+anywhere, with no dev shell around it, while the binary in `target/` — the same code
+without that wrapper — does not.
 
 ```bash
 # builds a wrapped, runnable binary at ./result/bin/clipboard-tool
@@ -131,10 +173,6 @@ Once installed into your profile, `clipboard-tool` is on your `PATH`
 `clipboard-tool` — it needs a graphical session (Wayland/X). The wrapped binary
 carries its own GL/Vulkan driver environment, so the popup renders outside the
 dev shell too.
-
-Without Nix, a standard `cargo build --release` works too, provided the native
-dev libraries are present (see `flake.nix` for the exact list: X11/Wayland/GL,
-`xdotool`/libxdo, GTK3 + libayatana-appindicator on Linux).
 
 ## Autostart
 

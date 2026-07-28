@@ -49,12 +49,12 @@ impl HistoryStore {
         self.items.get(index)
     }
 
-    #[allow(dead_code)] // used in tests; wired into the UI/tray in later phases
+    #[allow(dead_code)] // test-only helper; the UI reads the length off its snapshot
     pub fn len(&self) -> usize {
         self.items.len()
     }
 
-    #[allow(dead_code)] // used in tests; wired into the UI/tray in later phases
+    #[allow(dead_code)] // test-only helper; the UI reads the length off its snapshot
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
@@ -78,7 +78,8 @@ impl HistoryStore {
         self.items = items.into_iter().take(self.capacity).map(Arc::from).collect();
     }
 
-    #[allow(dead_code)] // used by the tray "clear history" action in Phase 6
+    // Called by the tray's "Clear history", which only exists on Linux so far.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn clear(&mut self) {
         self.items.clear();
     }

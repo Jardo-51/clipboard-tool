@@ -60,20 +60,44 @@ impl Config {
                     Self::default()
                 }
             },
-            Err(_) => {
+            // First run: no config yet, so seed one with the defaults.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let cfg = Self::default();
                 cfg.write_default(&path);
                 cfg
+            }
+            // Anything else — a root-owned file, a hardened ~/.config, an
+            // SELinux denial — is a real error. Treating it as "not there yet"
+            // would silently ignore the user's actual config and then try to
+            // overwrite it.
+            Err(e) => {
+                eprintln!("config: cannot read {} ({e}); using defaults", path.display());
+                Self::default()
             }
         }
     }
 
     fn write_default(&self, path: &Path) {
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "config: cannot create {} ({e}); continuing with defaults \
+                     and no config file",
+                    parent.display()
+                );
+                return;
+            }
         }
-        if let Ok(body) = toml::to_string(self) {
-            let _ = std::fs::write(path, format!("{FILE_HEADER}{body}"));
+        match toml::to_string(self) {
+            Ok(body) => {
+                if let Err(e) = std::fs::write(path, format!("{FILE_HEADER}{body}")) {
+                    eprintln!(
+                        "config: cannot write {} ({e}); continuing with defaults",
+                        path.display()
+                    );
+                }
+            }
+            Err(e) => eprintln!("config: cannot serialize the default config ({e})"),
         }
     }
 

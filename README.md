@@ -56,10 +56,16 @@ nix develop
 # run the daemon; then copy a few things and press Ctrl+Shift+V (the default)
 cargo run
 
-# tests / lints
+# tests / lints / formatting
 cargo test
 cargo clippy
+cargo fmt          # --check to verify without rewriting
 ```
+
+Code is formatted with rustfmt's default style; please run `cargo fmt` before
+opening a PR. The bulk-format commit is listed in `.git-blame-ignore-revs`, so
+`git config blame.ignoreRevsFile .git-blame-ignore-revs` keeps `git blame`
+useful (GitHub applies it automatically).
 
 With [direnv](https://direnv.net/): `direnv allow` auto-enters the shell.
 

@@ -51,16 +51,20 @@
           pkgs.vulkan-loader  # libvulkan.so.1 that wgpu dlopens
         ];
 
-        # All x86_64 Vulkan ICDs nix Mesa ships (hardware for whatever GPU is
-        # present, plus lavapipe as a software fallback). Discovered rather than
-        # hardcoded so this isn't tied to one GPU vendor.
-        mesaVulkanICDs =
-          let
-            dir = "${pkgs.mesa}/share/vulkan/icd.d";
-            names = builtins.attrNames (builtins.readDir dir);
-            x64 = builtins.filter (n: pkgs.lib.hasSuffix "x86_64.json" n) names;
-          in
-          pkgs.lib.concatMapStringsSep ":" (n: "${dir}/${n}") x64;
+        # Directory holding nix Mesa's Vulkan ICD manifests (hardware drivers for
+        # whatever GPU is present, plus lavapipe as a software fallback).
+        #
+        # The Vulkan loader accepts a directory here and enumerates it at
+        # runtime, so we still avoid hardcoding a per-vendor driver list — and
+        # unlike a `builtins.readDir` over the same path, pointing at it does not
+        # force mesa to be realised during *evaluation*. That import-from-
+        # derivation would build or substitute mesa before evaluation could
+        # finish, and would fail outright under restricted eval or
+        # `--option allow-import-from-derivation false`.
+        #
+        # VK_DRIVER_FILES is also the current name; VK_ICD_FILENAMES is
+        # deprecated in recent loaders.
+        mesaVulkanICDDir = "${pkgs.mesa}/share/vulkan/icd.d";
 
         rustPlatform = pkgs.makeRustPlatform {
           cargo = rust;
@@ -101,7 +105,7 @@
               --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath (libs ++ graphicsLibs)} \
               --set-default LIBGL_DRIVERS_PATH ${pkgs.mesa}/lib/dri \
               --set-default __EGL_VENDOR_LIBRARY_DIRS ${pkgs.mesa}/share/glvnd/egl_vendor.d \
-              --set-default VK_ICD_FILENAMES ${mesaVulkanICDs}
+              --set-default VK_DRIVER_FILES ${mesaVulkanICDDir}
           '';
 
           meta = {
@@ -124,7 +128,7 @@
           # window can create a surface (see graphicsLibs above).
           LIBGL_DRIVERS_PATH = "${pkgs.mesa}/lib/dri";
           __EGL_VENDOR_LIBRARY_DIRS = "${pkgs.mesa}/share/glvnd/egl_vendor.d";
-          VK_ICD_FILENAMES = mesaVulkanICDs;
+          VK_DRIVER_FILES = mesaVulkanICDDir;
         });
       });
 }

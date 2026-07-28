@@ -13,7 +13,10 @@
 //! [`wayland`] and [`platform`].
 
 // Hide the console window on Windows in release builds.
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 
 mod autostart;
 mod config;
@@ -99,7 +102,8 @@ fn main() -> eframe::Result<()> {
     // Only name a shortcut in the UI if one is actually live. On the portal path
     // the compositor may hand the user a different binding, so the configured
     // one is a best-effort answer there.
-    let hotkey_label = (use_portal_hotkey || hotkey_manager.is_some()).then(|| config.hotkey_label());
+    let hotkey_label =
+        (use_portal_hotkey || hotkey_manager.is_some()).then(|| config.hotkey_label());
 
     let shared = Arc::new(Shared {
         history: Mutex::new(store),
@@ -143,7 +147,9 @@ fn main() -> eframe::Result<()> {
             let shared_for_hotkeys = shared.clone();
             let ctx_for_hotkeys = ctx.clone();
             let on_hotkey = move || {
-                shared_for_hotkeys.show_requested.store(true, Ordering::SeqCst);
+                shared_for_hotkeys
+                    .show_requested
+                    .store(true, Ordering::SeqCst);
                 ctx_for_hotkeys.request_repaint();
             };
 
@@ -153,9 +159,7 @@ fn main() -> eframe::Result<()> {
                 std::thread::spawn(move || {
                     let receiver = GlobalHotKeyEvent::receiver();
                     while let Ok(event) = receiver.recv() {
-                        if event.id == id
-                            && event.state == global_hotkey::HotKeyState::Pressed
-                        {
+                        if event.id == id && event.state == global_hotkey::HotKeyState::Pressed {
                             on_hotkey();
                         }
                     }

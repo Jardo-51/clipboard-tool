@@ -50,7 +50,8 @@ pub fn save(path: &Path, items: &[String]) -> std::io::Result<()> {
         TMP_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
 
-    if let Err(e) = write_private(&tmp, json.as_bytes()).and_then(|()| std::fs::rename(&tmp, path)) {
+    if let Err(e) = write_private(&tmp, json.as_bytes()).and_then(|()| std::fs::rename(&tmp, path))
+    {
         // Unique names don't self-clean the way a fixed one did.
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -135,7 +136,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("history.json");
 
-        let items = vec!["newest".to_string(), "middle".to_string(), "oldest".to_string()];
+        let items = vec![
+            "newest".to_string(),
+            "middle".to_string(),
+            "oldest".to_string(),
+        ];
         save(&path, &items).unwrap();
         assert_eq!(load(&path), items);
 
@@ -176,7 +181,8 @@ mod tests {
             for n in 0..8 {
                 let path = path.clone();
                 s.spawn(move || {
-                    let items: Vec<String> = (0..50).map(|i| format!("thread {n} item {i}")).collect();
+                    let items: Vec<String> =
+                        (0..50).map(|i| format!("thread {n} item {i}")).collect();
                     for _ in 0..20 {
                         save(&path, &items).unwrap();
                         // Every observed state must be a complete history.
@@ -192,7 +198,10 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

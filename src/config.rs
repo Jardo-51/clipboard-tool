@@ -83,7 +83,10 @@ impl Config {
             // would silently ignore the user's actual config and then try to
             // overwrite it.
             Err(e) => {
-                eprintln!("config: cannot read {} ({e}); using defaults", path.display());
+                eprintln!(
+                    "config: cannot read {} ({e}); using defaults",
+                    path.display()
+                );
                 Self::default()
             }
         }

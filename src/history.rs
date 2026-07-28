@@ -75,7 +75,11 @@ impl HistoryStore {
     /// Replace the contents with a previously saved (newest-first) list,
     /// truncated to the current capacity.
     pub fn restore(&mut self, items: Vec<String>) {
-        self.items = items.into_iter().take(self.capacity).map(Arc::from).collect();
+        self.items = items
+            .into_iter()
+            .take(self.capacity)
+            .map(Arc::from)
+            .collect();
     }
 
     // Called by the tray's "Clear history", which only exists on Linux so far.

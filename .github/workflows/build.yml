@@ -1,0 +1,58 @@
+name: Build
+
+# Push-only: development happens on branches in this repo, so every PR head is
+# also a push here and picks up the status. Note this means PRs from *forks*
+# get no check, and that what's tested is the branch head rather than the merge
+# result — add `pull_request:` below if either starts to matter.
+on: push
+
+# A new push to the same branch makes the in-flight run obsolete.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Cheap and needs nothing else installed, so it runs before the apt step.
+      - name: Check formatting
+        run: cargo fmt --check
+
+      # Only the libraries that are *linked* at build time, derived from the
+      # -sys crates in Cargo.lock: gtk-sys/gdk-sys/pango-sys/atk-sys (libgtk-3),
+      # libappindicator-sys, libxdo-sys, and xkbcommon. libgtk-3-dev pulls in
+      # the X11 headers the rest of the tree needs.
+      #
+      # This is deliberately narrower than flake.nix's `libs`, which also covers
+      # what gets dlopen'd at *runtime* (libGL, libei, the X11 extension libs).
+      # Nothing here runs the GUI, so those aren't required — but flake.nix
+      # stays the source of truth if this list ever needs to grow.
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            libxkbcommon-dev \
+            libwayland-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test

@@ -37,6 +37,7 @@ impl HistoryStore {
         true
     }
 
+    #[allow(dead_code)] // test-only helper; the UI reads items through `iter`
     pub fn get(&self, index: usize) -> Option<&String> {
         self.items.get(index)
     }

@@ -375,17 +375,18 @@ impl PopupApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }
 
-    /// Commit the currently selected item: hide the popup so focus returns to
-    /// the previously active window, then (off the UI thread) place the item on
-    /// the clipboard and synthesize a paste into that window.
-    fn commit_selection(&mut self, ctx: &egui::Context) {
-        let chosen = self
-            .shared
-            .history
-            .lock()
-            .ok()
-            .and_then(|h| h.get(self.selected).cloned());
-
+    /// Commit `chosen`: hide the popup so focus returns to the previously active
+    /// window, then (off the UI thread) place the item on the clipboard and
+    /// synthesize a paste into that window.
+    ///
+    /// The item is passed in rather than looked up by index here, because the
+    /// store can change between the frame the user saw and the keypress that
+    /// commits it: the watcher thread prepends on every clipboard change, which
+    /// shifts every index by one, and the tray's Clear empties the list
+    /// outright. Resolving `self.selected` against the store at this point would
+    /// paste the neighbour of the highlighted item, or nothing at all. The
+    /// caller resolves it against the snapshot it actually rendered.
+    fn commit_selection(&mut self, ctx: &egui::Context, chosen: Option<String>) {
         // Hide first — the target app must regain focus before we paste.
         self.hide_popup(ctx);
 
@@ -467,7 +468,7 @@ impl eframe::App for PopupApp {
             return;
         }
         if commit {
-            self.commit_selection(&ctx);
+            self.commit_selection(&ctx, items.get(self.selected).cloned());
             return;
         }
 
@@ -506,7 +507,7 @@ impl eframe::App for PopupApp {
         });
 
         if commit {
-            self.commit_selection(&ctx);
+            self.commit_selection(&ctx, items.get(self.selected).cloned());
         }
     }
 }

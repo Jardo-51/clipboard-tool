@@ -193,6 +193,33 @@ mod tests {
     }
 
     #[test]
+    fn restore_truncates_to_capacity() {
+        // A saved history can be longer than the configured history_size (the
+        // user shrank it between runs), and restore documents that it keeps the
+        // newest items — which are at the front.
+        let mut h = HistoryStore::new(3);
+        h.restore(vec![
+            "newest".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+            "dropped".to_string(),
+            "also dropped".to_string(),
+        ]);
+        assert_eq!(h.len(), 3);
+        assert_eq!(h.get(0).unwrap().as_ref(), "newest");
+        assert_eq!(h.get(2).unwrap().as_ref(), "third");
+    }
+
+    #[test]
+    fn restore_replaces_rather_than_appends() {
+        let mut h = HistoryStore::new(5);
+        h.push("stale".into());
+        h.restore(vec!["from disk".to_string()]);
+        assert_eq!(h.len(), 1);
+        assert_eq!(h.get(0).unwrap().as_ref(), "from disk");
+    }
+
+    #[test]
     fn restore_drops_oversized_entries() {
         // A history.json written before the cap existed must not reintroduce
         // an entry `push` would now refuse.

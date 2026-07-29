@@ -486,14 +486,7 @@ impl PopupApp {
         // Straight to disk rather than via `dirty` — see [`flush_history`].
         flush_history(&self.shared);
 
-        // Everything below the deleted row shifted up by one, so follow it to
-        // stay on the same entry. Deleting the highlighted row itself leaves the
-        // index alone, which lands on what was the next entry.
-        if rendered_index < self.selected {
-            self.selected -= 1;
-        }
-        // The list is one shorter now; don't leave the highlight past the end.
-        self.selected = self.selected.min(rendered_len.saturating_sub(2));
+        self.selected = selection_after_removal(self.selected, rendered_index, rendered_len);
     }
 }
 
@@ -734,6 +727,28 @@ impl eframe::App for PopupApp {
     }
 }
 
+/// Where the highlight should land after the row at `removed` is dropped from a
+/// list that was `rendered_len` long.
+///
+/// Everything below the deleted row shifts up by one, so a selection below it
+/// follows to stay on the same entry. Deleting the highlighted row itself leaves
+/// the index alone, which lands on what was the next entry — except at the end
+/// of the list, where there is no next entry and the highlight clamps to the new
+/// last row (`rendered_len - 2`). Deleting the only entry leaves nothing to
+/// highlight and the clamp saturates to 0.
+///
+/// Split out of [`PopupApp::remove_item`] to be testable: it's the one piece of
+/// the delete path whose off-by-one behaviour isn't obvious by inspection, and
+/// getting it wrong shows up only as a highlight on the wrong row.
+fn selection_after_removal(selected: usize, removed: usize, rendered_len: usize) -> usize {
+    let shifted = if removed < selected {
+        selected - 1
+    } else {
+        selected
+    };
+    shifted.min(rendered_len.saturating_sub(2))
+}
+
 /// Collapse a clipboard entry to a single trimmed preview line for the popup.
 ///
 /// Builds the line lazily and stops at [`PREVIEW_MAX_CHARS`]. Flattening the
@@ -776,6 +791,39 @@ fn center_on_screen(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleting_above_the_highlight_follows_it_up() {
+        // Rows below the deleted one shift up, so the highlight must too or it
+        // lands on the neighbour of the entry the user was looking at.
+        assert_eq!(selection_after_removal(3, 1, 5), 2);
+        assert_eq!(selection_after_removal(1, 0, 5), 0);
+    }
+
+    #[test]
+    fn deleting_below_the_highlight_leaves_it_alone() {
+        assert_eq!(selection_after_removal(1, 3, 5), 1);
+    }
+
+    #[test]
+    fn deleting_the_highlighted_row_lands_on_what_was_next() {
+        // Same index, one shorter list — that's the row that moved up into it.
+        assert_eq!(selection_after_removal(2, 2, 5), 2);
+    }
+
+    #[test]
+    fn deleting_the_highlighted_last_row_clamps_to_the_new_last() {
+        // Nothing moves up into the old index here, so it would point past the
+        // end of the shortened list.
+        assert_eq!(selection_after_removal(4, 4, 5), 3);
+    }
+
+    #[test]
+    fn deleting_the_only_entry_does_not_underflow() {
+        // An empty list has no row to highlight; the clamp must saturate rather
+        // than wrap to usize::MAX.
+        assert_eq!(selection_after_removal(0, 0, 1), 0);
+    }
 
     #[test]
     fn preview_collapses_whitespace() {

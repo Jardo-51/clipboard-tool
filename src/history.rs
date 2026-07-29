@@ -216,16 +216,21 @@ impl HistoryStore {
         self.items.is_empty()
     }
 
-    /// The items in display order (favorites first, newest first within each).
-    /// Cloning what this yields is cheap.
+    /// The items in display order (favorites first, newest first within each),
+    /// borrowed. Every caller outside the tests wants [`snapshot`] instead: they
+    /// hold the store's `Mutex` and can't keep borrowing through the guard once
+    /// they let go of it.
+    ///
+    /// [`snapshot`]: Self::snapshot
+    #[allow(dead_code)] // test-only helper; see above
     pub fn iter(&self) -> impl Iterator<Item = &Entry> {
         self.items.iter()
     }
 
-    /// A copy of the items in the same order, for persistence. Like [`iter`],
-    /// this shares the entry texts rather than copying them.
-    ///
-    /// [`iter`]: Self::iter
+    /// A copy of the items in the same order, for the callers that need to let
+    /// go of the lock before using them: the save path and the popup's per-frame
+    /// render. This shares the entry texts rather than copying them, which is
+    /// what makes it affordable at frame rate.
     pub fn snapshot(&self) -> Vec<Entry> {
         self.items.iter().cloned().collect()
     }

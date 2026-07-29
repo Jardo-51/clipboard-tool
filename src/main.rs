@@ -589,7 +589,7 @@ impl eframe::App for PopupApp {
             .shared
             .history
             .lock()
-            .map(|h| h.iter().cloned().collect())
+            .map(|h| h.snapshot())
             .unwrap_or_default();
         let len = items.len();
 

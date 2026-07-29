@@ -19,10 +19,13 @@ actually look at. Verified on a Linux host with a live X session.
    dies with `Wgpu(CreateSurfaceError(... FailedToCreateSurfaceForAnyBackend))`.
    The dev shell is what supplies mesa, `LIBGL_DRIVERS_PATH`, and
    `VK_DRIVER_FILES` (lavapipe as the software fallback) — see `flake.nix`.
-2. **Never send Enter to the popup.** Enter runs `commit_selection`, which puts
-   the entry on the real clipboard and synthesizes a real paste into whichever
-   window regains focus. On a live desktop that types into the user's editor or
-   browser. Dismiss with **Escape**.
+2. **Never send Enter to the popup, and never click a row's preview.** Both run
+   `commit_selection`, which puts the entry on the real clipboard and
+   synthesizes a real paste into whichever window regains focus. On a live
+   desktop that types into the user's editor or browser. Dismiss with
+   **Escape**. The per-row trash button is safe to click — it only edits the
+   throwaway history — but it sits a few pixels from the preview, so read
+   "Driving the mouse" below before aiming at it.
 3. **Sandbox the XDG dirs.** Without this the app reads and rewrites the user's
    real clipboard history at `~/.local/share/clipboard-tool/history.json` —
    which holds whatever passwords and tokens they have copied.
@@ -47,7 +50,32 @@ EOF
 Include a long entry and a multi-line one — they exercise `one_line_preview`,
 which is where layout regressions show up first.
 
-## Step 2 — Build and launch
+## Step 2 — Check nothing else is already running
+
+```bash
+pgrep -ax clipboard-tool   # must print nothing
+```
+
+Only one process can hold the X11 grab on the hotkey. A second instance starts
+fine, logs `hotkey: could not register 'ctrl+shift+KeyV' (HotKey already
+registered)` and degrades to no hotkey at all — so `xdotool` presses go to the
+*other* process, your popup never appears, and the run looks broken for reasons
+that have nothing to do with the change under test. It also poisons the
+readiness poll in the next step, which would match the other process and return
+instantly.
+
+If something is running, it may be the user's own daemon or a leftover from an
+earlier run of this skill. `pkill -x clipboard-tool` when it is yours; ask
+before killing one you did not start. To coexist with a daemon you must not
+touch, give the sandboxed config a different shortcut instead — the format is
+`"<modifiers>+<Code>"` with winit key codes (`src/config.rs`):
+
+```bash
+mkdir -p /tmp/ct-run/config/clipboard-tool
+printf 'hotkey = "ctrl+shift+F9"\n' > /tmp/ct-run/config/clipboard-tool/config.toml
+```
+
+## Step 3 — Build and launch
 
 `cargo run` builds and launches in one `nix develop` entry. Entering the shell
 costs ~1s warm and ~3s when nix's eval cache is cold, so a separate
@@ -77,7 +105,7 @@ command. `Gtk-Message: Failed to load module "canberra-gtk-module"` is benign.
 Once the process is up, no window appears yet — the viewport starts hidden by
 design.
 
-## Step 3 — Show the popup and find its window
+## Step 4 — Show the popup and find its window
 
 The default hotkey is `Ctrl+Shift+V` (`DEFAULT_HOTKEY` in `src/config.rs`). The
 app holds a global grab on it, so the keystroke does not reach whatever window
@@ -93,11 +121,23 @@ WIN=$(DISPLAY=:2 wmctrl -lG | awk '$NF=="clipboard-tool"{print $1}')
 Match the title exactly. A plain `grep clipboard-tool` also hits any terminal
 whose title carries the repo path, and you would screenshot that instead.
 
-If no window is listed, the grab failed (another clipboard manager already owns
-the shortcut — `register_global_hotkey` warns and degrades rather than
-aborting). Check `/tmp/ct-run/app.log`.
+If no window is listed, start with the log — the grab is the usual culprit and
+it always says so:
 
-## Step 4 — Screenshot the window, and look at it
+```bash
+grep -i hotkey /tmp/ct-run/app.log
+```
+
+`could not register` means something else owns the shortcut (go back to step 2;
+it may also be a clipboard manager the desktop ships). `register_global_hotkey`
+warns and degrades rather than aborting, so the process is still alive and
+looks healthy — the absence of a window is the only other symptom. Do not
+conclude the popup is broken, or that the WM refuses to map it, until that
+grep comes back empty: the window exists as an unmapped 460x340 client from the
+moment the app starts, so `xwininfo` reporting `IsUnMapped` proves nothing on
+its own.
+
+## Step 5 — Screenshot the window, and look at it
 
 Capture the window by id, not the root: the root grabs the user's whole desktop
 into the transcript.
@@ -114,7 +154,7 @@ truncating with an ellipsis, and a **uniform background** (a horizontal seam
 below the last row means a filled `Frame` shrank to its content instead of
 covering the window).
 
-## Step 5 — Drive it
+## Step 6 — Drive it
 
 ```bash
 DISPLAY=:2 xdotool key --clearmodifiers Down Down   # selection moves + follows
@@ -125,7 +165,35 @@ Re-screenshot after the arrows to confirm the highlight tracked the selection.
 After Escape the window disappears from `wmctrl -l` but the process stays alive,
 ready for the next hotkey.
 
-## Step 6 — Clean up
+### Driving the mouse
+
+Take the popup's origin from `xwininfo`, never from `wmctrl`:
+
+```bash
+DISPLAY=:2 xwininfo -id "$WIN" | grep -E "Absolute|Width|Height"
+```
+
+`wmctrl -lG` reports desktop-scaled coordinates — on a HiDPI session they come
+back doubled (220,130 for a window actually at +110+65), and clicks aimed with
+them land in whatever window is behind the popup. The screenshot PNG is 1:1
+with the window, so screen position = `xwininfo` origin + the pixel position
+you read off the image.
+
+Hover before you click, and confirm the hit in a screenshot:
+
+```bash
+DISPLAY=:2 xdotool mousemove $X $Y; sleep 1        # then screenshot
+DISPLAY=:2 xdotool getmouselocation --shell        # WINDOW= must be $(printf '%d' $WIN)
+DISPLAY=:2 xdotool click 1
+```
+
+The trash button draws a frame and a "Remove from history" tooltip under the
+pointer, so the screenshot tells you whether you are on the button or on the
+preview next to it — and clicking the preview pastes into the user's desktop
+(rule 2). A missed click also focuses another window, which makes the popup
+auto-dismiss on focus loss; that is correct behaviour, not a bug to chase.
+
+## Step 7 — Clean up
 
 ```bash
 pkill -x clipboard-tool

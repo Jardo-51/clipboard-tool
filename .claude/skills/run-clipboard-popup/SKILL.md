@@ -205,13 +205,13 @@ DISPLAY=:2 xdotool click 1
 
 Each icon button draws a frame and a tooltip under the pointer — "Remove from
 history" for the trash, "Add to favorites"/"Remove from favorites" for the star
-just left of it — so the screenshot tells you which button you are on, or whether
-you are on the row around them; anywhere on that row other than a button commits,
-pasting into the user's desktop (rule 2). Do not treat a near-miss as harmless: a click that
-lands a few pixels short of the icon is still inside the row, so it pastes. Only
-a click that misses the popup entirely is inert — that one focuses another
-window and the popup auto-dismisses on focus loss, which is correct behaviour,
-not a bug to chase.
+just left of it — so the screenshot tells you which button you are on, or
+whether you are on the row around them; anywhere on that row other than a button
+commits, pasting into the user's desktop (rule 2). Do not treat a near-miss as
+harmless: a click that lands a few pixels short of the icon is still inside the
+row, so it pastes. Only a click that misses the popup entirely is inert — that
+one focuses another window and the popup auto-dismisses on focus loss, which is
+correct behaviour, not a bug to chase.
 
 ## Step 7 — Clean up
 

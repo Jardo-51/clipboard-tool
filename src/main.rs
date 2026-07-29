@@ -152,11 +152,13 @@ fn main() -> eframe::Result<()> {
             // Not the real size: the window starts as a single point and is
             // grown to [`POPUP_WIDTH`] × [`POPUP_HEIGHT`] just before the first
             // show — see [`PopupApp::logic`]. No minimum size is asked for
-            // here for the same reason (it would be a floor the initial size
+            // here for the same reason: it would be a floor the initial size
             // sits under, and the window manager would enlarge the window to
-            // meet it); `with_resizable(false)` makes winit pin the minimum and
-            // the maximum to whatever size is requested, so the grown window
-            // ends up clamped to its real size just the same.
+            // meet it. `with_resizable(false)` pins a minimum and a maximum of
+            // its own, but not to a size that follows the window: on Wayland
+            // winit pins them exactly once, to whatever the window measures at
+            // creation, which is this single point. `logic` therefore re-sends
+            // both hints itself when it grows the window.
             .with_inner_size([POPUP_INITIAL_SIZE, POPUP_INITIAL_SIZE])
             .with_decorations(false)
             .with_always_on_top()
@@ -605,10 +607,18 @@ impl eframe::App for PopupApp {
         // eframe forces the window on screen once, so once grown it stays.
         if !self.grown && self.shared.show_requested.load(Ordering::SeqCst) {
             self.grown = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                POPUP_WIDTH,
-                POPUP_HEIGHT,
-            )));
+            let full_size = egui::vec2(POPUP_WIDTH, POPUP_HEIGHT);
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(full_size));
+            // The size hints `with_resizable(false)` pinned do not follow that
+            // resize on every backend. On X11 winit re-derives them from each
+            // resize request, but on Wayland it set them once at window
+            // creation and never looks again, so the toplevel would go on
+            // advertising a maximum of one point while committing a full-sized
+            // buffer — and compositors are entitled to size floating windows by
+            // that maximum. Send the hints along rather than depend on which
+            // backend is underneath.
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(full_size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(full_size));
             // The popup is event-driven and the hotkey's own repaint has been
             // spent on this frame, so without this it would idle here — one
             // point across, with a show still pending.

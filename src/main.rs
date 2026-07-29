@@ -49,6 +49,13 @@ const POPUP_HEIGHT: f32 = 340.0;
 /// A window may not be zero-sized — X11 rejects it and egui clamps the command
 /// to 1 — so one point is the floor.
 const POPUP_INITIAL_SIZE: f32 = 1.0;
+/// How many frames the first show waits for that grow to reach the layout
+/// before opening the popup anyway. Ten is generous — the wait normally ends on
+/// the first frame — while capping what a window manager that ignores the
+/// resize outright can cost: eframe idles ten milliseconds per frame while the
+/// window is hidden, so about a tenth of a second, once, and the popup still
+/// opens.
+const MAX_GROW_WAIT_FRAMES: u32 = 10;
 /// Padding between the popup's contents and the window edge, in points. The
 /// window is undecorated, so nothing else keeps the rows off the border.
 const POPUP_MARGIN: i8 = 8;
@@ -424,6 +431,13 @@ struct PopupApp {
     /// False until the window has been grown from the point-sized one it is
     /// born as to [`POPUP_WIDTH`] × [`POPUP_HEIGHT`]. See [`PopupApp::logic`].
     grown: bool,
+    /// Set when the window is grown and cleared once the first show has gone
+    /// ahead, which waits for the grown size to reach the layout. Only ever
+    /// true during that first show. See [`PopupApp::logic`].
+    pending_show: bool,
+    /// Frames spent so far waiting for the grow to reach the layout, against
+    /// [`MAX_GROW_WAIT_FRAMES`].
+    grow_wait_frames: u32,
     /// Whether the popup has actually held keyboard focus since it was last
     /// shown. Used to defer the focus-loss auto-dismiss until *after* the
     /// window manager has granted focus, so the popup doesn't hide itself on
@@ -444,6 +458,8 @@ impl PopupApp {
             visible: false,
             initialized: false,
             grown: false,
+            pending_show: false,
+            grow_wait_frames: 0,
             focused_once: false,
             scroll_to_selection: false,
         }
@@ -600,11 +616,11 @@ impl eframe::App for PopupApp {
         // dozen frames later — a resize sent in that gap lands while the window
         // is still on screen and puts the full-sized flash right back.
         //
-        // The show itself is then left pending for a frame rather than done
-        // here, because this frame's layout was taken from the old size before
-        // `logic` ran: showing now would map a full-sized window over a
-        // point-sized painting of it. Only the first show pays that frame —
-        // eframe forces the window on screen once, so once grown it stays.
+        // The show itself is then left pending rather than done here, because
+        // this frame's layout was taken from the old size before `logic` ran:
+        // showing now would map a full-sized window over a point-sized painting
+        // of it. Only the first show pays that wait — eframe forces the window
+        // on screen once, so once grown it stays.
         if !self.grown && self.shared.show_requested.load(Ordering::SeqCst) {
             self.grown = true;
             let full_size = egui::vec2(POPUP_WIDTH, POPUP_HEIGHT);
@@ -619,11 +635,39 @@ impl eframe::App for PopupApp {
             // backend is underneath.
             ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(full_size));
             ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(full_size));
+            self.pending_show = true;
             // The popup is event-driven and the hotkey's own repaint has been
             // spent on this frame, so without this it would idle here — one
             // point across, with a show still pending.
             ctx.request_repaint();
             return;
+        }
+
+        // Wait for the grow to be reflected in the layout size before showing,
+        // rather than counting on it having landed by the next frame. The
+        // resize is only a request: on X11 it is a `ConfigureRequest` redirected
+        // to the window manager, and the viewport rect comes back from a live
+        // `GetGeometry`, so it reports the new size no sooner than another
+        // process gets round to acting. Showing early would map a window the
+        // server has already grown over a painting still laid out at a point.
+        //
+        // The wait is bounded because that request can also simply be refused,
+        // and a popup that never opens is a far worse failure than one cosmetic
+        // frame. Requests on a connection are served in order, so the resize is
+        // always applied before the map regardless; what the bound risks is
+        // only egui not yet knowing the size it should lay this frame out at.
+        //
+        // The comparison keeps a point of slack: the reported width has been
+        // through physical pixels and back, and one point is plenty to tell the
+        // grown window from the point-sized one either way.
+        if self.pending_show {
+            let laid_out_width = ctx.input(|i| i.viewport_rect().width());
+            if laid_out_width < POPUP_WIDTH - 1.0 && self.grow_wait_frames < MAX_GROW_WAIT_FRAMES {
+                self.grow_wait_frames += 1;
+                ctx.request_repaint();
+                return;
+            }
+            self.pending_show = false;
         }
 
         if self.shared.show_requested.swap(false, Ordering::SeqCst) {

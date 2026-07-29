@@ -59,7 +59,15 @@ impl Entry {
 /// footprint bounded by (`capacity` + favorites) × [`MAX_ITEM_BYTES`], and
 /// favorites only grow by an explicit click each.
 ///
+/// The bound on the non-favorite block is enforced by [`push`], not on every
+/// mutation: [`toggle_favorite`] deliberately lets the block sit over `capacity`
+/// rather than evict, so the store can hold a few more entries than `capacity`
+/// between one copy and the next. The footprint bound above is unaffected, since
+/// the overshoot is only ever entries that were already being held as favorites.
+///
 /// [`favorite_count`]: Self::favorite_count
+/// [`push`]: Self::push
+/// [`toggle_favorite`]: Self::toggle_favorite
 pub struct HistoryStore {
     items: VecDeque<Entry>,
     capacity: usize,
@@ -163,10 +171,17 @@ impl HistoryStore {
     /// is also the more useful of the two — the user just reached for that row,
     /// so it is the one they are most likely to want next.
     ///
-    /// Unstarring can push the unstarred block past `capacity`, so the oldest
-    /// entries are evicted here as they are on [`push`]. The entry just toggled
-    /// is never the one dropped: it goes to the front of that block, and
-    /// eviction takes from the back.
+    /// Unstarring can push the unstarred block past `capacity`, and nothing is
+    /// evicted here to bring it back down — the overshoot is left for the next
+    /// [`push`] to trim. Trimming on the spot would make a star/unstar round trip
+    /// destroy a *third* entry the user never touched: starring frees a slot in
+    /// the unstarred block, an ordinary copy fills it, and unstarring would then
+    /// evict whatever had aged to the back. Nothing in the popup suggests that a
+    /// toggle of a star deletes a row further down, so it must not.
+    ///
+    /// Letting the block run over is safe: the entries are still contiguous and
+    /// still behind the favorites, so every other method's invariant holds, and
+    /// `push` trims with a `while` loop that clears an overshoot of any size.
     ///
     /// [`push`]: Self::push
     pub fn toggle_favorite(&mut self, value: &str) -> bool {
@@ -181,7 +196,6 @@ impl HistoryStore {
             self.favorite_count()
         };
         self.items.insert(target, entry);
-        self.trim_to_capacity();
         true
     }
 
@@ -528,11 +542,11 @@ mod tests {
     }
 
     #[test]
-    fn unfavoriting_can_evict_the_oldest_unstarred_item() {
-        // The unstarred block is over capacity the moment the entry rejoins it,
-        // and it is the oldest that has to go — never the one just toggled.
-        // Starring first is what makes room: the block fills to capacity while
-        // the favorite sits outside it.
+    fn a_star_unstar_round_trip_keeps_every_other_entry() {
+        // Starring frees a slot in the unstarred block, which the next ordinary
+        // copy fills; the block is therefore over capacity the moment the entry
+        // rejoins it. Evicting there would delete "oldest", which the user never
+        // touched — they only clicked the same star twice.
         let mut h = HistoryStore::new(2);
         h.push("demote".into());
         h.toggle_favorite("demote");
@@ -541,7 +555,26 @@ mod tests {
         assert_eq!(texts(&h), ["demote", "newer", "oldest"]);
 
         h.toggle_favorite("demote");
-        assert_eq!(texts(&h), ["demote", "newer"]);
+        assert_eq!(texts(&h), ["demote", "newer", "oldest"]);
+        assert_eq!(flags(&h), [false, false, false]);
+    }
+
+    #[test]
+    fn the_next_copy_trims_an_over_capacity_unstarred_block() {
+        // The overshoot an unstar leaves is transient, and `push` clears it in
+        // one go however far over the block has run.
+        let mut h = HistoryStore::new(2);
+        h.push("a".into());
+        h.push("b".into());
+        h.toggle_favorite("a");
+        h.toggle_favorite("b");
+        h.push("c".into());
+        h.toggle_favorite("a");
+        h.toggle_favorite("b");
+        assert_eq!(texts(&h), ["b", "a", "c"], "two unstars, no eviction yet");
+
+        h.push("d".into());
+        assert_eq!(texts(&h), ["d", "b"]);
     }
 
     #[test]

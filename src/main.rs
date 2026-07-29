@@ -6,9 +6,8 @@
 //! puts the chosen entry back on the clipboard and synthesizes a paste into the
 //! window that had focus, the trash icon on a row drops that entry, the star
 //! icon pins it above the rest, and Esc or clicking away dismisses it. A tray
-//! icon offers the same actions, and the
-//! history is restored across restarts unless `persist` is turned off in
-//! `config.toml`.
+//! icon offers the same actions, and the history is restored across restarts
+//! unless `persist` is turned off in `config.toml`.
 //!
 //! This module owns the shared state and the wiring between those threads; the
 //! pieces live in [`history`], [`persist`], [`config`], [`tray`], [`autostart`],

@@ -39,6 +39,9 @@ use history::HistoryStore;
 
 const POPUP_WIDTH: f32 = 460.0;
 const POPUP_HEIGHT: f32 = 340.0;
+/// Padding between the popup's contents and the window edge, in points. The
+/// window is undecorated, so nothing else keeps the rows off the border.
+const POPUP_MARGIN: i8 = 8;
 /// Grace period after hiding the popup before synthesizing the paste, so the
 /// OS can return focus to the previously active window.
 const FOCUS_RETURN_DELAY: Duration = Duration::from_millis(120);
@@ -521,27 +524,35 @@ impl eframe::App for PopupApp {
         }
 
         // --- Render (into the central Ui eframe provides) ---
-        ui.heading("Clipboard history");
-        ui.separator();
-        if len == 0 {
-            ui.label("No items yet — copy something.");
-            return;
-        }
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for (idx, item) in items.iter().enumerate() {
-                let selected = idx == self.selected;
-                let resp = ui.selectable_label(selected, one_line_preview(item));
-                if resp.clicked() {
-                    self.selected = idx;
-                    commit = true;
+        // That `Ui` comes with no margin, so without a frame the heading and the
+        // rows would sit flush against the edge of this undecorated window. Only
+        // the margin is wanted here: a filled frame (`Frame::central_panel`)
+        // shrinks to its content, which two-tones the window below the last row.
+        egui::Frame::new()
+            .inner_margin(POPUP_MARGIN)
+            .show(ui, |ui| {
+                ui.heading("Clipboard history");
+                ui.separator();
+                if len == 0 {
+                    ui.label("No items yet — copy something.");
+                    return;
                 }
-                // Only follow the selection when it actually moved, so the
-                // mouse wheel isn't fighting a re-center every frame.
-                if selected && self.scroll_to_selection {
-                    resp.scroll_to_me(Some(egui::Align::Center));
-                }
-            }
-        });
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for (idx, item) in items.iter().enumerate() {
+                        let selected = idx == self.selected;
+                        let resp = ui.selectable_label(selected, one_line_preview(item));
+                        if resp.clicked() {
+                            self.selected = idx;
+                            commit = true;
+                        }
+                        // Only follow the selection when it actually moved, so the
+                        // mouse wheel isn't fighting a re-center every frame.
+                        if selected && self.scroll_to_selection {
+                            resp.scroll_to_me(Some(egui::Align::Center));
+                        }
+                    }
+                });
+            });
         self.scroll_to_selection = false;
 
         if commit {

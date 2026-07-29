@@ -73,6 +73,23 @@ impl HistoryStore {
         true
     }
 
+    /// Drop the entry whose contents equal `value`, returning `true` if one was
+    /// removed.
+    ///
+    /// Matching on contents rather than on an index is deliberate. The popup
+    /// acts on a snapshot it rendered, and the watcher thread prepends on every
+    /// clipboard change, so an index from that snapshot can address a different
+    /// entry by the time the click is handled — deleting the neighbour of the
+    /// row the user aimed at. Contents are unique here (`push` de-duplicates),
+    /// so at most one entry can match.
+    pub fn remove(&mut self, value: &str) -> bool {
+        let Some(pos) = self.items.iter().position(|v| v.as_ref() == value) else {
+            return false;
+        };
+        self.items.remove(pos);
+        true
+    }
+
     #[allow(dead_code)] // test-only helper; the UI reads items through `iter`
     pub fn get(&self, index: usize) -> Option<&Arc<str>> {
         self.items.get(index)
@@ -190,6 +207,38 @@ mod tests {
         assert_eq!(h.len(), 2);
         assert_eq!(h.get(0).unwrap().as_ref(), "b");
         assert_eq!(h.get(1).unwrap().as_ref(), "a");
+    }
+
+    #[test]
+    fn remove_drops_only_the_named_entry() {
+        let mut h = HistoryStore::new(5);
+        h.push("a".into());
+        h.push("b".into());
+        h.push("c".into());
+        assert!(h.remove("b"));
+        assert_eq!(h.len(), 2);
+        assert_eq!(h.get(0).unwrap().as_ref(), "c");
+        assert_eq!(h.get(1).unwrap().as_ref(), "a");
+    }
+
+    #[test]
+    fn remove_reports_a_miss() {
+        // The popup can ask for an entry the watcher or a "Clear" already took
+        // out; that must be a no-op rather than disturbing the rest.
+        let mut h = HistoryStore::new(5);
+        h.push("a".into());
+        assert!(!h.remove("gone"));
+        assert_eq!(h.len(), 1);
+    }
+
+    #[test]
+    fn removed_entries_can_be_recorded_again() {
+        let mut h = HistoryStore::new(5);
+        h.push("a".into());
+        assert!(h.remove("a"));
+        assert!(h.is_empty());
+        assert!(h.push("a".into()));
+        assert_eq!(h.get(0).unwrap().as_ref(), "a");
     }
 
     #[test]

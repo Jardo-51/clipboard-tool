@@ -49,6 +49,12 @@ const FOCUS_RETURN_DELAY: Duration = Duration::from_millis(120);
 const PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 /// Longest preview line shown per history row, in characters.
 const PREVIEW_MAX_CHARS: usize = 80;
+/// Glyph for the per-row delete button. U+1F5D1 is carried by the bundled
+/// `emoji-icon-font`, which egui's default fonts fall back to.
+const DELETE_ICON: &str = "🗑";
+/// Breathing room between the delete icons and whatever is to their right — the
+/// scroll bar when the list overflows, the window margin when it doesn't.
+const ROW_TRAILING_GAP: f32 = 6.0;
 
 /// Shared application state between the clipboard-watcher thread, the
 /// hotkey-listener thread, the tray thread, and the egui UI thread.
@@ -436,6 +442,36 @@ impl PopupApp {
             });
         }
     }
+
+    /// Drop the history entry the user clicked the trash icon on, and keep the
+    /// highlight on a sensible row.
+    ///
+    /// `rendered_index` and `rendered_len` describe the snapshot the click
+    /// happened on, not the store: the watcher thread can have prepended in the
+    /// meantime. They're only used to move the highlight — the entry itself is
+    /// identified by its contents (see [`HistoryStore::remove`]), so the wrong
+    /// item can't be deleted, at worst the highlight lands a row off.
+    fn remove_item(&mut self, rendered_index: usize, item: &str, rendered_len: usize) {
+        let removed = self
+            .shared
+            .history
+            .lock()
+            .map(|mut h| h.remove(item))
+            .unwrap_or(false);
+        if !removed {
+            return;
+        }
+        self.shared.dirty.store(true, Ordering::SeqCst);
+
+        // Everything below the deleted row shifted up by one, so follow it to
+        // stay on the same entry. Deleting the highlighted row itself leaves the
+        // index alone, which lands on what was the next entry.
+        if rendered_index < self.selected {
+            self.selected -= 1;
+        }
+        // The list is one shorter now; don't leave the highlight past the end.
+        self.selected = self.selected.min(rendered_len.saturating_sub(2));
+    }
 }
 
 impl eframe::App for PopupApp {
@@ -528,6 +564,11 @@ impl eframe::App for PopupApp {
         // rows would sit flush against the edge of this undecorated window. Only
         // the margin is wanted here: a filled frame (`Frame::central_panel`)
         // shrinks to its content, which two-tones the window below the last row.
+        // The row whose delete button was pressed this frame, as (index in the
+        // snapshot, contents). Applied after rendering, so the store isn't
+        // mutated while the list built from it is still being drawn.
+        let mut to_remove: Option<(usize, Arc<str>)> = None;
+
         egui::Frame::new()
             .inner_margin(POPUP_MARGIN)
             .show(ui, |ui| {
@@ -537,23 +578,83 @@ impl eframe::App for PopupApp {
                     ui.label("No items yet — copy something.");
                     return;
                 }
+                // egui's default scroll bar floats *over* the content and swells
+                // from 2 to 6 points while hovered, which puts it on top of the
+                // delete icons at the right edge. A solid bar allocates its own
+                // width instead, so the rows end where it begins.
+                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    let row_height = ui.spacing().interact_size.y;
+                    // Measured once, outside the loop, and reused for every row.
+                    // Reading it per row instead lets any row that overflows widen
+                    // the scroll area's content, which widens the next row's
+                    // measurement in turn — the delete buttons then walk right
+                    // down the list until they fall off the window.
+                    let row_width = (ui.available_width() - ROW_TRAILING_GAP).max(0.0);
                     for (idx, item) in items.iter().enumerate() {
                         let selected = idx == self.selected;
-                        let resp = ui.selectable_label(selected, one_line_preview(item));
-                        if resp.clicked() {
-                            self.selected = idx;
-                            commit = true;
-                        }
-                        // Only follow the selection when it actually moved, so the
-                        // mouse wheel isn't fighting a re-center every frame.
-                        if selected && self.scroll_to_selection {
-                            resp.scroll_to_me(Some(egui::Align::Center));
-                        }
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(row_width, row_height),
+                            // Right-to-left: the delete button is placed first and
+                            // so keeps the right edge whatever width the glyph and
+                            // its padding actually come to. Sizing a column for it
+                            // up front and hoping the button fits is what drifted —
+                            // `add_sized` is a suggestion, not a clamp.
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                // `frame_when_inactive(false)` keeps the icon quiet
+                                // until it's hovered, so the rows don't read as a
+                                // column of buttons.
+                                let delete = ui
+                                    .add(egui::Button::new(DELETE_ICON).frame_when_inactive(false))
+                                    .on_hover_text("Remove from history");
+                                if delete.clicked() {
+                                    to_remove = Some((idx, item.clone()));
+                                }
+
+                                // Whatever the button left behind, to the pixel.
+                                let preview_width = ui.available_width();
+                                // A plain `selectable_label` would centre its text
+                                // once it's this wide; the explicit layout keeps the
+                                // preview left-aligned and caps the width the text
+                                // is truncated against.
+                                let resp = ui
+                                    .allocate_ui_with_layout(
+                                        egui::vec2(preview_width, row_height),
+                                        egui::Layout::left_to_right(egui::Align::Center)
+                                            .with_main_align(egui::Align::Min),
+                                        |ui| {
+                                            ui.add(
+                                                egui::Button::selectable(
+                                                    selected,
+                                                    one_line_preview(item),
+                                                )
+                                                .truncate()
+                                                .min_size(egui::vec2(preview_width, 0.0)),
+                                            )
+                                        },
+                                    )
+                                    .inner;
+                                if resp.clicked() {
+                                    self.selected = idx;
+                                    commit = true;
+                                }
+                                // Only follow the selection when it actually moved, so
+                                // the mouse wheel isn't fighting a re-center every frame.
+                                if selected && self.scroll_to_selection {
+                                    resp.scroll_to_me(Some(egui::Align::Center));
+                                }
+                            },
+                        );
                     }
                 });
             });
         self.scroll_to_selection = false;
+
+        if let Some((idx, item)) = to_remove {
+            self.remove_item(idx, &item, len);
+            return; // the snapshot is stale now; redraw from the store next frame
+        }
 
         if commit {
             self.commit_selection(&ctx, items.get(self.selected).cloned());

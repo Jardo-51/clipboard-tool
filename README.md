@@ -232,7 +232,8 @@ persist = true
   overwrite the only copy of it.
 - `history_size` caps the *unstarred* items only. Favorites are exempt, so
   pinning something means it is still there after a busy day of copying; they
-  only go away when you unstar them, delete them, or use **Clear history**.
+  only go away when you unstar them or delete them — even **Clear history
+  (except favorites)** leaves them alone.
 - Entries larger than **1 MiB** are not recorded, so copying a large file's
   contents doesn't pull tens of megabytes into memory and into `history.json`.
   Such a copy is skipped rather than shortened — a truncated entry would be
@@ -243,7 +244,9 @@ persist = true
 
 - **Show history** — open the popup (same as the hotkey)
 - **Start on login** — toggle autostart
-- **Clear history** — empties the list, favorites included
+- **Clear history (except favorites)** — drops every unstarred entry; starred
+  ones stay. To get rid of one of those, unstar it first or delete it from the
+  popup.
 - **Quit**
 
 ## Development notes

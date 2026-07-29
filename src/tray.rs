@@ -1,5 +1,5 @@
 //! System-tray icon with a context menu (Show history / Start on login /
-//! Clear history / Quit).
+//! Clear history (except favorites) / Quit).
 //!
 //! Linux is the primary target and is implemented here. `tray-icon` requires a
 //! running GTK main loop, and eframe already owns the winit event loop, so the
@@ -41,7 +41,7 @@ pub fn spawn(shared: Arc<Shared>, ctx: egui::Context) {
         let show_item = MenuItem::new(show_label, true, None);
         let autostart_item =
             CheckMenuItem::new("Start on login", true, crate::autostart::is_enabled(), None);
-        let clear_item = MenuItem::new("Clear history", true, None);
+        let clear_item = MenuItem::new("Clear history (except favorites)", true, None);
         let quit_item = MenuItem::new("Quit", true, None);
         if let Err(e) = menu.append_items(&[
             &show_item,
@@ -105,7 +105,7 @@ pub fn spawn(shared: Arc<Shared>, ctx: egui::Context) {
                 ctx.request_repaint();
             } else if id == clear_id {
                 if let Ok(mut h) = shared.history.lock() {
-                    h.clear();
+                    h.clear_except_favorites();
                 }
                 // Emptied history goes to disk immediately, for the same reason
                 // the popup's per-row delete does — see `crate::flush_history`.

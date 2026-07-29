@@ -288,10 +288,21 @@ impl HistoryStore {
             .collect();
     }
 
-    // Called by the tray's "Clear history", which only exists on Linux so far.
+    /// Drop every unstarred entry, keeping the favorites.
+    ///
+    /// Called by the tray's "Clear history (except favorites)", which only
+    /// exists on Linux so far. Sparing the favorites is the same promise the
+    /// capacity exemption makes: a star means the entry is still there later,
+    /// and a menu item aimed at the day's accumulated clutter is not where the
+    /// user expects to lose the handful of entries they explicitly kept. The
+    /// star is per-row and reversible, so anything they do want gone can be
+    /// unstarred first, or deleted from the popup.
+    ///
+    /// Favorites form a prefix, so truncating at the boundary drops exactly the
+    /// unstarred block and leaves the order intact.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub fn clear(&mut self) {
-        self.items.clear();
+    pub fn clear_except_favorites(&mut self) {
+        self.items.truncate(self.favorite_count());
     }
 }
 
@@ -646,6 +657,43 @@ mod tests {
             Entry::new("plain 2", false),
         ]);
         assert_eq!(texts(&h), ["fav 1", "fav 2", "plain 1"]);
+    }
+
+    #[test]
+    fn clearing_spares_the_favorites() {
+        // The tray item says "except favorites"; a star has to survive it, or
+        // the one gesture for keeping an entry loses to the one for tidying up.
+        let mut h = HistoryStore::new(5);
+        h.push("plain 1".into());
+        h.push("keep me".into());
+        h.push("plain 2".into());
+        h.toggle_favorite("keep me");
+        h.clear_except_favorites();
+        assert_eq!(texts(&h), ["keep me"]);
+        assert_eq!(flags(&h), [true]);
+    }
+
+    #[test]
+    fn clearing_with_nothing_starred_empties_the_history() {
+        let mut h = HistoryStore::new(5);
+        h.push("a".into());
+        h.push("b".into());
+        h.clear_except_favorites();
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn a_cleared_history_still_accepts_new_copies_in_order() {
+        // Truncation has to leave the favorites-first split intact, or the next
+        // copy lands in the wrong block.
+        let mut h = HistoryStore::new(5);
+        h.push("keep me".into());
+        h.push("junk".into());
+        h.toggle_favorite("keep me");
+        h.clear_except_favorites();
+        h.push("fresh".into());
+        assert_eq!(texts(&h), ["keep me", "fresh"]);
+        assert_eq!(flags(&h), [true, false]);
     }
 
     #[test]

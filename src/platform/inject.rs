@@ -39,7 +39,14 @@ pub trait InputInjector: Send + Sync {
 }
 
 /// Cross-platform backend using `arboard` (clipboard) + `enigo` (keystrokes).
-/// Works on X11, Windows, macOS, and — experimentally — Wayland via libei.
+///
+/// `enigo` picks its own transport when [`Enigo::new`] runs, so there is no
+/// session branching to do here: we build it with the `wayland` feature on top
+/// of the default `x11rb`, and it tries the wlroots virtual-keyboard protocol
+/// first, then X11/XTEST. libei is *not* compiled in (that would need enigo's
+/// `libei_tokio` feature), which is why GNOME and KDE — which implement neither
+/// `zwp_virtual_keyboard_manager_v1` nor an XTEST path we can rely on — fall
+/// back to the user pressing Ctrl+V themselves.
 pub struct EnigoInjector;
 
 impl InputInjector for EnigoInjector {

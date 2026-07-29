@@ -12,8 +12,11 @@ pub use inject::InputInjector;
 
 /// Build the input injector appropriate for the current OS/session.
 ///
-/// Every platform currently uses the `enigo`-based backend; a Wayland-specific
-/// (libei) branch would go here.
+/// Every platform uses the `enigo`-based backend, and deliberately so: `enigo`
+/// already selects between the Wayland virtual-keyboard protocol and X11 at
+/// runtime, so branching on [`detect_session`] here would only second-guess it.
+/// A libei backend for GNOME/KDE is the one case that would need its own arm —
+/// see [`inject::EnigoInjector`] for why it isn't wired up.
 pub fn default_injector() -> Box<dyn InputInjector> {
     Box::new(inject::EnigoInjector)
 }

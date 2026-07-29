@@ -36,9 +36,12 @@ is pasted into whatever window you were using.
 
 ¹ macOS requires granting **Accessibility** permission (System Settings →
 Privacy & Security → Accessibility) for the hotkey and paste injection.
-² On GNOME/KDE the libei injection path isn't wired yet, so the item is placed
-on the clipboard and you press Ctrl+V yourself. wlroots uses the virtual-keyboard
-protocol and auto-pastes.
+² The injection backend is chosen by `enigo` at runtime, not by this app: it is
+built with the `wayland` feature on top of the default `x11rb`, and tries the
+wlroots virtual-keyboard protocol first, then X11/XTEST. GNOME and KDE implement
+neither, and libei — which is what they *do* support — needs enigo's
+`libei_tokio` feature and isn't compiled in, so there the item is placed on the
+clipboard and you press Ctrl+V yourself.
 ³ Linux tray needs a StatusNotifier host. KDE and most desktops have one;
 **GNOME requires the [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/)**.
 ⁴ Tray on Windows/macOS needs to share the winit event loop and is not wired yet;

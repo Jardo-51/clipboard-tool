@@ -123,10 +123,22 @@ impl HistoryStore {
     ///
     /// Entries over [`MAX_ITEM_BYTES`] are dropped here too, so a `history.json`
     /// written before the cap existed can't reintroduce them.
+    ///
+    /// Duplicates are dropped for the same reason, keeping the first (newest)
+    /// occurrence: [`remove`] identifies an entry by its contents and documents
+    /// that at most one can match, and a file that was hand-written rather than
+    /// produced by [`snapshot`] is under no obligation to be unique. With
+    /// duplicates loaded, deleting the second of two identical rows would take
+    /// out the first and leave the row the user clicked sitting there.
+    ///
+    /// [`remove`]: Self::remove
+    /// [`snapshot`]: Self::snapshot
     pub fn restore(&mut self, items: Vec<String>) {
+        let mut seen = std::collections::HashSet::new();
         self.items = items
             .into_iter()
             .filter(|s| s.len() <= MAX_ITEM_BYTES)
+            .filter(|s| seen.insert(s.clone()))
             .take(self.capacity)
             .map(Arc::from)
             .collect();
@@ -266,6 +278,24 @@ mod tests {
         h.restore(vec!["from disk".to_string()]);
         assert_eq!(h.len(), 1);
         assert_eq!(h.get(0).unwrap().as_ref(), "from disk");
+    }
+
+    #[test]
+    fn restore_drops_duplicates() {
+        // `remove` matches on contents and relies on them being unique. A
+        // hand-written history.json isn't obliged to be, so the de-duplication
+        // has to happen on the way in — keeping the newest occurrence.
+        let mut h = HistoryStore::new(5);
+        h.restore(vec![
+            "dup".to_string(),
+            "unique".to_string(),
+            "dup".to_string(),
+        ]);
+        assert_eq!(h.len(), 2);
+        assert_eq!(h.get(0).unwrap().as_ref(), "dup");
+        assert_eq!(h.get(1).unwrap().as_ref(), "unique");
+        assert!(h.remove("dup"));
+        assert!(!h.remove("dup"), "no second copy may be left behind");
     }
 
     #[test]

@@ -487,6 +487,11 @@ impl PopupApp {
         flush_history(&self.shared);
 
         self.selected = selection_after_removal(self.selected, rendered_index, rendered_len);
+        // Same as every other path that moves the highlight: the new row is
+        // usually adjacent to one that was on screen, but deleting near the top
+        // of the viewport while the selection sits below the fold would
+        // otherwise move it out of view.
+        self.scroll_to_selection = true;
     }
 }
 

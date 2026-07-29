@@ -10,6 +10,45 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde::{Deserialize, Serialize};
+
+use crate::history::Entry;
+
+/// One entry as written to `history.json`.
+///
+/// Borrowed on the way out so saving doesn't copy the entry texts, which are
+/// what the [`Entry`]'s `Arc<str>` exists to avoid.
+#[derive(Serialize)]
+struct StoredItem<'a> {
+    text: &'a str,
+    favorite: bool,
+}
+
+/// One entry as read back. Files written before favorites existed hold a bare
+/// string per entry, and a user who downgrades then upgrades again leaves one
+/// behind, so both shapes stay readable — a plain string simply isn't a
+/// favorite. `serde`'s untagged enum tries the variants in order, and a JSON
+/// string can only match `Text`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawItem {
+    Text(String),
+    Full {
+        text: String,
+        #[serde(default)]
+        favorite: bool,
+    },
+}
+
+impl From<RawItem> for Entry {
+    fn from(raw: RawItem) -> Self {
+        match raw {
+            RawItem::Text(text) => Entry::new(text, false),
+            RawItem::Full { text, favorite } => Entry::new(text, favorite),
+        }
+    }
+}
+
 /// Distinguishes concurrent temp files within one process; the pid separates
 /// them across processes.
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -18,17 +57,21 @@ pub fn history_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("clipboard-tool").join("history.json"))
 }
 
-/// Load a previously saved history (newest-first). Missing/corrupt files yield
-/// an empty list rather than failing.
-pub fn load(path: &Path) -> Vec<String> {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
+/// Load a previously saved history, in the order it was written. Missing or
+/// corrupt files yield an empty list rather than failing.
+pub fn load(path: &Path) -> Vec<Entry> {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<RawItem>>(&contents)
+        .unwrap_or_default()
+        .into_iter()
+        .map(Entry::from)
+        .collect()
 }
 
-/// Save the history (newest-first) via a temp-file + rename, so an interrupted
-/// write can't corrupt the existing file.
+/// Save the history, in the order given, via a temp-file + rename, so an
+/// interrupted write can't corrupt the existing file.
 ///
 /// The temp name is unique per call: `save` has several callers that can run
 /// concurrently (the periodic flush thread and the tray's Quit handler), and a
@@ -38,12 +81,19 @@ pub fn load(path: &Path) -> Vec<String> {
 ///
 /// Concurrent saves are still last-rename-wins; each writes a complete, valid
 /// file, so the worst case is a slightly stale history rather than a corrupt one.
-pub fn save(path: &Path, items: &[String]) -> std::io::Result<()> {
+pub fn save(path: &Path, items: &[Entry]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         restrict_dir(parent);
     }
-    let json = serde_json::to_string(items)?;
+    let stored: Vec<StoredItem> = items
+        .iter()
+        .map(|e| StoredItem {
+            text: &e.text,
+            favorite: e.favorite,
+        })
+        .collect();
+    let json = serde_json::to_string(&stored)?;
     let tmp = path.with_extension(format!(
         "json.{}.{}.tmp",
         std::process::id(),
@@ -130,19 +180,58 @@ fn restrict_dir(dir: &Path) {
 mod tests {
     use super::*;
 
+    /// `(text, favorite)` pairs, since [`Entry`] is compared field by field in
+    /// these tests rather than carrying a `PartialEq` the app has no use for.
+    fn pairs(items: &[Entry]) -> Vec<(&str, bool)> {
+        items
+            .iter()
+            .map(|e| (e.text.as_ref(), e.favorite))
+            .collect()
+    }
+
     #[test]
-    fn roundtrip_preserves_order() {
+    fn roundtrip_preserves_order_and_favorites() {
         let dir = std::env::temp_dir().join(format!("clipboard-tool-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("history.json");
 
         let items = vec![
-            "newest".to_string(),
-            "middle".to_string(),
-            "oldest".to_string(),
+            Entry::new("starred", true),
+            Entry::new("middle", false),
+            Entry::new("oldest", false),
         ];
         save(&path, &items).unwrap();
-        assert_eq!(load(&path), items);
+        assert_eq!(pairs(&load(&path)), pairs(&items));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_pre_favorites_history_still_loads() {
+        // Upgrading must not throw the user's history away: before favorites,
+        // the file was a plain array of strings.
+        let dir =
+            std::env::temp_dir().join(format!("clipboard-tool-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+
+        std::fs::write(&path, r#"["newest","oldest"]"#).unwrap();
+        assert_eq!(pairs(&load(&path)), [("newest", false), ("oldest", false)]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_corrupt_history_loads_empty() {
+        // Neither shape: the file is ignored rather than failing the startup
+        // that reads it.
+        let dir =
+            std::env::temp_dir().join(format!("clipboard-tool-corrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+
+        std::fs::write(&path, "{ not json at all").unwrap();
+        assert!(load(&path).is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -160,7 +249,7 @@ mod tests {
         std::fs::write(&path, "[]").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        save(&path, &["secret".to_string()]).unwrap();
+        save(&path, &[Entry::new("secret", false)]).unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "history.json must not be group/world readable");
@@ -181,8 +270,9 @@ mod tests {
             for n in 0..8 {
                 let path = path.clone();
                 s.spawn(move || {
-                    let items: Vec<String> =
-                        (0..50).map(|i| format!("thread {n} item {i}")).collect();
+                    let items: Vec<Entry> = (0..50)
+                        .map(|i| Entry::new(format!("thread {n} item {i}"), false))
+                        .collect();
                     for _ in 0..20 {
                         save(&path, &items).unwrap();
                         // Every observed state must be a complete history.

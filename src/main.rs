@@ -4,8 +4,9 @@
 //! capped, de-duplicating history. A global hotkey (`Ctrl+Shift+V` by default)
 //! shows a centered egui popup of the recent items: arrow keys navigate, Enter
 //! puts the chosen entry back on the clipboard and synthesizes a paste into the
-//! window that had focus, the trash icon on a row drops that entry, and Esc or
-//! clicking away dismisses it. A tray icon offers the same actions, and the
+//! window that had focus, the trash icon on a row drops that entry, the star
+//! icon pins it above the rest, and Esc or clicking away dismisses it. A tray
+//! icon offers the same actions, and the
 //! history is restored across restarts unless `persist` is turned off in
 //! `config.toml`.
 //!
@@ -38,7 +39,9 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 
 use history::HistoryStore;
 
-const POPUP_WIDTH: f32 = 460.0;
+/// Wide enough that the preview keeps roughly the room it had before the star
+/// button joined the trash icon at the end of each row.
+const POPUP_WIDTH: f32 = 520.0;
 const POPUP_HEIGHT: f32 = 340.0;
 /// Padding between the popup's contents and the window edge, in points. The
 /// window is undecorated, so nothing else keeps the rows off the border.
@@ -53,6 +56,12 @@ const PREVIEW_MAX_CHARS: usize = 80;
 /// Glyph for the per-row delete button. U+1F5D1 is carried by the bundled
 /// `emoji-icon-font`, which egui's default fonts fall back to.
 const DELETE_ICON: &str = "🗑";
+/// Glyphs for the per-row favorite toggle: filled when the item is starred,
+/// outlined when it isn't. U+2605/U+2606 come from the same `emoji-icon-font` as
+/// [`DELETE_ICON`] — the emoji star (U+2B50) is in `NotoEmoji` but has no
+/// outlined counterpart there, so the pair would not match.
+const FAVORITE_ICON_ON: &str = "★";
+const FAVORITE_ICON_OFF: &str = "☆";
 /// Breathing room between the delete icons and whatever is to their right — the
 /// scroll bar when the list overflows, the window margin when it doesn't.
 const ROW_TRAILING_GAP: f32 = 6.0;
@@ -493,6 +502,47 @@ impl PopupApp {
         // otherwise move it out of view.
         self.scroll_to_selection = true;
     }
+
+    /// Star or unstar the entry the user clicked the star on, keeping the
+    /// highlight on whatever entry it was on before.
+    ///
+    /// Toggling reorders the list — that is the point of the feature — so the
+    /// highlight's index means something different afterwards, and leaving it
+    /// alone would silently move it to a different entry. `selected` is the
+    /// entry it was on in the snapshot that was clicked; the store is asked
+    /// where that entry sits now. It can be gone (the watcher's de-duplication
+    /// or a tray "Clear" ran in between), in which case the index stays put and
+    /// lands on whatever is there — the same best effort the delete path makes.
+    fn toggle_favorite(&mut self, item: &str, selected: Option<Arc<str>>) {
+        let Ok(mut history) = self.shared.history.lock() else {
+            return;
+        };
+        if !history.toggle_favorite(item) {
+            return;
+        }
+        if let Some(index) = selected.and_then(|text| history.position(&text)) {
+            self.selected = index;
+        }
+        drop(history);
+
+        // Unlike a delete, this goes through `dirty` rather than straight to
+        // disk: a star that doesn't survive a crash in the next few seconds is a
+        // lost click, not a secret left behind in `history.json`.
+        self.shared.dirty.store(true, Ordering::SeqCst);
+        // The entry moved, and often a long way — pinning the last row of a full
+        // history puts it at the top, off the visible part of the list.
+        self.scroll_to_selection = true;
+    }
+}
+
+/// Contents of the highlighted row in a rendered snapshot, if there is one.
+///
+/// The store is never indexed with `self.selected` directly: the watcher thread
+/// reorders the history on every clipboard change, so an index resolved against
+/// the store rather than the snapshot the user actually clicked can name a
+/// different entry (see [`PopupApp::commit_selection`]).
+fn selected_text(items: &[history::Entry], selected: usize) -> Option<Arc<str>> {
+    items.get(selected).map(|e| e.text.clone())
 }
 
 impl eframe::App for PopupApp {
@@ -528,7 +578,7 @@ impl eframe::App for PopupApp {
         // precisely so this stays a few refcount bumps rather than a deep copy
         // of every entry, which at frame rate would be ruinous for the large
         // entries a clipboard routinely holds.
-        let items: Vec<Arc<str>> = self
+        let items: Vec<history::Entry> = self
             .shared
             .history
             .lock()
@@ -563,7 +613,7 @@ impl eframe::App for PopupApp {
             return;
         }
         if commit {
-            self.commit_selection(&ctx, items.get(self.selected).cloned());
+            self.commit_selection(&ctx, selected_text(&items, self.selected));
             return;
         }
 
@@ -584,6 +634,10 @@ impl eframe::App for PopupApp {
         // snapshot, contents). Applied after rendering, so the store isn't
         // mutated while the list built from it is still being drawn.
         let mut to_remove: Option<(usize, Arc<str>)> = None;
+        // Likewise for the row whose star was pressed. Only the contents are
+        // needed: starring reorders the list, so the rendered index says nothing
+        // about where the entry ends up.
+        let mut to_toggle_favorite: Option<Arc<str>> = None;
 
         // --- Render (into the central Ui eframe provides) ---
         // That `Ui` comes with no margin, so without a frame the heading and the
@@ -649,7 +703,25 @@ impl eframe::App for PopupApp {
                                     .add(egui::Button::new(DELETE_ICON).frame_when_inactive(false))
                                     .on_hover_text("Remove from history");
                                 if delete.clicked() {
-                                    to_remove = Some((idx, item.clone()));
+                                    to_remove = Some((idx, item.text.clone()));
+                                }
+
+                                // Left of the delete button, for the same reason
+                                // it is added after: right-to-left places each
+                                // widget at the left edge of what is left.
+                                let (star, tooltip) = if item.favorite {
+                                    (FAVORITE_ICON_ON, "Remove from favorites")
+                                } else {
+                                    (FAVORITE_ICON_OFF, "Add to favorites")
+                                };
+                                // Unframed like the trash icon, so the rows don't
+                                // read as a column of buttons; filled vs. outlined
+                                // is what carries the state.
+                                let favorite = ui
+                                    .add(egui::Button::new(star).frame_when_inactive(false))
+                                    .on_hover_text(tooltip);
+                                if favorite.clicked() {
+                                    to_toggle_favorite = Some(item.text.clone());
                                 }
 
                                 // Whatever the button left behind, to the pixel.
@@ -664,7 +736,8 @@ impl eframe::App for PopupApp {
                                         // background; painting the highlight by hand
                                         // means putting it back by hand.
                                         ui.add_space(ui.spacing().button_padding.x);
-                                        let mut text = egui::RichText::new(one_line_preview(item));
+                                        let mut text =
+                                            egui::RichText::new(one_line_preview(&item.text));
                                         if selected {
                                             text = text.color(ui.visuals().selection.stroke.color);
                                         }
@@ -726,8 +799,15 @@ impl eframe::App for PopupApp {
             return;
         }
 
+        // Same reasoning as the delete above: separate responses over
+        // overlapping rectangles, and committing pastes into the user's window.
+        if let Some(item) = to_toggle_favorite {
+            self.toggle_favorite(&item, selected_text(&items, self.selected));
+            return;
+        }
+
         if commit {
-            self.commit_selection(&ctx, items.get(self.selected).cloned());
+            self.commit_selection(&ctx, selected_text(&items, self.selected));
         }
     }
 }

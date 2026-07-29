@@ -5,9 +5,13 @@ Light-weight, cross-platform clipboard **history** manager written in Rust.
 It runs quietly in the background, records everything you copy, and on a global
 hotkey (**Ctrl+Shift+V** by default) pops up a small centered menu of recent
 items. Navigate with the **arrow keys**, press **Enter**, and the selected item
-is pasted into whatever window you were using.
+is pasted into whatever window you were using. Each row also carries a **star**
+and a **trash** icon: the star pins the item to the top of the list, the trash
+drops it.
 
 - **Cross-platform**: Linux (X11 + Wayland), Windows, macOS
+- **Favorites**: starred items stay pinned above the rolling history and are
+  never evicted to make room for new copies
 - **Resource-efficient**: native binary, no runtime/GC, size-optimized release
   profile, event-driven (idle at rest)
 - **Configurable** hotkey, history size, and persistence
@@ -205,7 +209,7 @@ A commented `config.toml` is created on first run in the platform config dir
 # The key is a physical code such as KeyV, KeyA, Digit1, F5.
 hotkey = "ctrl+shift+KeyV"
 
-# maximum number of items to remember
+# maximum number of items to remember (favorites are kept on top of this)
 history_size = 100
 
 # keep history across restarts (stored as JSON in the data dir)
@@ -221,7 +225,12 @@ persist = true
   history** instead, or pick a different `hotkey`.
 - History is persisted to `~/.local/share/clipboard-tool/history.json` (Linux),
   written atomically (temp file + rename), flushed every few seconds when it
-  changes and on quit.
+  changes and on quit. Each entry is stored as `{"text": …, "favorite": …}`; a
+  file written by an older build — a plain array of strings — still loads, with
+  nothing starred.
+- `history_size` caps the *unstarred* items only. Favorites are exempt, so
+  pinning something means it is still there after a busy day of copying; they
+  only go away when you unstar them, delete them, or use **Clear history**.
 - Entries larger than **1 MiB** are not recorded, so copying a large file's
   contents doesn't pull tens of megabytes into memory and into `history.json`.
   Such a copy is skipped rather than shortened — a truncated entry would be
@@ -232,7 +241,7 @@ persist = true
 
 - **Show history** — open the popup (same as the hotkey)
 - **Start on login** — toggle autostart
-- **Clear history**
+- **Clear history** — empties the list, favorites included
 - **Quit**
 
 ## Development notes
@@ -242,7 +251,7 @@ Project layout:
 ```
 src/
   main.rs        # daemon wiring, session detection, CLI, event loop, egui popup
-  history.rs     # capped, de-duplicating ring buffer
+  history.rs     # capped, de-duplicating ring buffer with pinned favorites
   config.rs      # config.toml load/defaults, hotkey parsing
   persist.rs     # JSON history load/save (atomic)
   platform/

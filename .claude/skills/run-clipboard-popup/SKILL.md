@@ -19,17 +19,17 @@ actually look at. Verified on a Linux host with a live X session.
    dies with `Wgpu(CreateSurfaceError(... FailedToCreateSurfaceForAnyBackend))`.
    The dev shell is what supplies mesa, `LIBGL_DRIVERS_PATH`, and
    `VK_DRIVER_FILES` (lavapipe as the software fallback) — see `flake.nix`.
-2. **Never send Enter to the popup, and never click a row anywhere but its
-   trash button.** Both run `commit_selection`, which puts the entry on the real
-   clipboard and synthesizes a real paste into whichever window regains focus.
-   On a live desktop that types into the user's editor or browser. The whole row
-   commits, not just the preview text: `ui.interact(row_rect, …)` in `main.rs`
-   senses clicks across the row's full width, so the empty space between the end
-   of a short preview and the trash icon commits too — and that gap is exactly
-   where a near-miss aimed at the icon lands. Dismiss with **Escape**. The
-   per-row trash button is safe to click — it only edits the throwaway history —
-   but it sits a few pixels from the rest of the row, which commits, so read
-   "Driving the mouse" below before aiming at it.
+2. **Never send Enter to the popup, and never click a row anywhere but its star
+   or trash button.** Both run `commit_selection`, which puts the entry on the
+   real clipboard and synthesizes a real paste into whichever window regains
+   focus. On a live desktop that types into the user's editor or browser. The
+   whole row commits, not just the preview text: `ui.interact(row_rect, …)` in
+   `main.rs` senses clicks across the row's full width, so the empty space
+   between the end of a short preview and the icons commits too — and that gap is
+   exactly where a near-miss aimed at an icon lands. Dismiss with **Escape**. The
+   per-row star and trash buttons are safe to click — they only edit the
+   throwaway history — but they sit a few pixels from the rest of the row, which
+   commits, so read "Driving the mouse" below before aiming at them.
 3. **Sandbox the XDG dirs.** Without this the app reads and rewrites the user's
    real clipboard history at `~/.local/share/clipboard-tool/history.json` —
    which holds whatever passwords and tokens they have copied.
@@ -37,22 +37,27 @@ actually look at. Verified on a Linux host with a live X session.
 ## Step 1 — Seed a throwaway history
 
 The popup shows nothing until the clipboard watcher records something, so
-pre-seed the store instead of waiting on a real copy. The file is a plain JSON
-array of strings, newest first (`src/persist.rs`).
+pre-seed the store instead of waiting on a real copy. The file is a JSON array
+of `{"text": …, "favorite": …}` objects, favorites first and newest first within
+each block (`src/persist.rs`, `src/history.rs`). A bare string is also accepted
+for backwards compatibility and means "not a favorite", so an older seed file
+still works.
 
 ```bash
 mkdir -p /tmp/ct-run/data/clipboard-tool /tmp/ct-run/config
 cat > /tmp/ct-run/data/clipboard-tool/history.json <<'EOF'
-["https://github.com/example/repo/pull/1",
- "cargo build --release --locked",
- "A long entry that runs past the eighty-character preview limit so the truncation and the ellipsis are visible in the screenshot",
- "multi\nline\nsnippet with a tab\there",
- "ff4a242"]
+[{"text": "git rebase -i origin/main", "favorite": true},
+ {"text": "https://github.com/example/repo/pull/1", "favorite": false},
+ {"text": "cargo build --release --locked", "favorite": false},
+ {"text": "A long entry that runs past the eighty-character preview limit so the truncation and the ellipsis are visible in the screenshot", "favorite": false},
+ {"text": "multi\nline\nsnippet with a tab\there", "favorite": false},
+ {"text": "ff4a242", "favorite": false}]
 EOF
 ```
 
 Include a long entry and a multi-line one — they exercise `one_line_preview`,
-which is where layout regressions show up first.
+which is where layout regressions show up first — and at least one favorite, so
+the filled star and the pinned-to-top ordering are both visible.
 
 ## Step 2 — Check nothing else is already running
 
@@ -123,7 +128,7 @@ has focus.
 ```bash
 DISPLAY=:2 xdotool key --clearmodifiers ctrl+shift+v
 sleep 2
-DISPLAY=:2 wmctrl -lG | awk '$NF=="clipboard-tool"'   # -> id, and 460x340 geometry
+DISPLAY=:2 wmctrl -lG | awk '$NF=="clipboard-tool"'   # -> id, and 520x340 geometry
 WIN=$(DISPLAY=:2 wmctrl -lG | awk '$NF=="clipboard-tool"{print $1}')
 ```
 
@@ -142,7 +147,7 @@ it may also be a clipboard manager the desktop ships). `register_global_hotkey`
 warns and degrades rather than aborting, so the process is still alive and
 looks healthy — the absence of a window is the only other symptom. Do not
 conclude the popup is broken, or that the WM refuses to map it, until that
-grep comes back empty: the window exists as an unmapped 460x340 client from the
+grep comes back empty: the window exists as an unmapped 520x340 client from the
 moment the app starts, so `xwininfo` reporting `IsUnMapped` proves nothing on
 its own.
 
@@ -159,9 +164,11 @@ ffmpeg -y -loglevel error -i /tmp/ct-run/popup.xwd /tmp/ct-run/popup.png
 `Read` the PNG. A blank or uniformly black frame means it never rendered — that
 is a failure, not a pass. Things worth checking deliberately: padding at all
 four edges, the selection highlight spanning the full row width, long entries
-truncating with an ellipsis, and a **uniform background** (a horizontal seam
-below the last row means a filled `Frame` shrank to its content instead of
-covering the window).
+truncating with an ellipsis, the star and trash icons lining up in a column at
+the right edge (filled star on the seeded favorite, which must be the first row;
+outlined on the others), and a **uniform background** (a horizontal seam below
+the last row means a filled `Frame` shrank to its content instead of covering the
+window).
 
 ## Step 6 — Drive it
 
@@ -196,10 +203,11 @@ DISPLAY=:2 xdotool getmouselocation --shell        # WINDOW= must be $(printf '%
 DISPLAY=:2 xdotool click 1
 ```
 
-The trash button draws a frame and a "Remove from history" tooltip under the
-pointer, so the screenshot tells you whether you are on the button or on the row
-around it — and anywhere on that row other than the button commits, pasting into
-the user's desktop (rule 2). Do not treat a near-miss as harmless: a click that
+Each icon button draws a frame and a tooltip under the pointer — "Remove from
+history" for the trash, "Add to favorites"/"Remove from favorites" for the star
+just left of it — so the screenshot tells you which button you are on, or whether
+you are on the row around them; anywhere on that row other than a button commits,
+pasting into the user's desktop (rule 2). Do not treat a near-miss as harmless: a click that
 lands a few pixels short of the icon is still inside the row, so it pastes. Only
 a click that misses the popup entirely is inert — that one focuses another
 window and the popup auto-dismisses on focus loss, which is correct behaviour,

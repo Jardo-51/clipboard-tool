@@ -94,17 +94,22 @@ portal path cannot be driven this way.
 DISPLAY=:2 WAYLAND_DISPLAY= \
   XDG_DATA_HOME=/tmp/ct-run/data XDG_CONFIG_HOME=/tmp/ct-run/config \
   nix develop -c cargo run > /tmp/ct-run/app.log 2>&1 &
-for i in $(seq 120); do pgrep -x clipboard-tool >/dev/null && break; sleep 0.5; done
+for i in $(seq 600); do pgrep -x clipboard-tool >/dev/null && break; sleep 0.5; done
 ```
 
 Poll for the process rather than sleeping a fixed number of seconds. The
 compile now happens inside that wait, so its length varies from nothing to
 minutes on a cold `target/`, and a blind sleep would send the hotkey into a
-process that does not exist yet — which then reads like a failed key grab.
+process that does not exist yet — which then reads like a failed key grab. The
+cap is five minutes for the same reason: a cold build has to fit inside it, or
+the poll gives up on a compile that is still going fine.
 
-If the loop times out, the build failed: the error is in `/tmp/ct-run/app.log`,
-since `cargo run` reports compile errors there rather than at the launch
-command. `Gtk-Message: Failed to load module "canberra-gtk-module"` is benign.
+If the loop times out, either the build failed or it is still running — check
+`/tmp/ct-run/app.log`, where `cargo run` reports compile errors and progress
+rather than at the launch command. An error there means the build failed; a log
+that ends mid-compile means it just needs longer, so wait rather than debugging
+a launch that has not happened yet. `Gtk-Message: Failed to load module
+"canberra-gtk-module"` is benign.
 
 Once the process is up, no window appears yet — the viewport starts hidden by
 design.

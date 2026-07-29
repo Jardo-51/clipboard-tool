@@ -219,6 +219,11 @@ persist = true
 - History is persisted to `~/.local/share/clipboard-tool/history.json` (Linux),
   written atomically (temp file + rename), flushed every few seconds when it
   changes and on quit.
+- Entries larger than **1 MiB** are not recorded, so copying a large file's
+  contents doesn't pull tens of megabytes into memory and into `history.json`.
+  Such a copy is skipped rather than shortened — a truncated entry would be
+  pasted back later as if it were the real thing — and the clipboard itself is
+  untouched, so Ctrl+V still pastes it in full.
 
 ## Tray menu
 

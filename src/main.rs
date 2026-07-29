@@ -526,10 +526,8 @@ impl PopupApp {
         if !history.toggle_favorite(item) {
             return;
         }
-        match selected.and_then(|text| history.position(&text)) {
-            Some(index) => self.selected = index,
-            None => self.selected = self.selected.min(history.len().saturating_sub(1)),
-        }
+        let moved_to = selected.and_then(|text| history.position(&text));
+        self.selected = selection_after_toggle(self.selected, moved_to, history.len());
         drop(history);
 
         // Unlike a delete, this goes through `dirty` rather than straight to
@@ -841,6 +839,28 @@ fn selection_after_removal(selected: usize, removed: usize, rendered_len: usize)
     shifted.min(rendered_len.saturating_sub(2))
 }
 
+/// Where the highlight should land after a star toggle has reordered a list that
+/// is now `len` long.
+///
+/// `moved_to` is where the entry the highlight was on has ended up, or `None` if
+/// it is no longer in the store. Following it is the whole point of resolving it
+/// at all: a toggle moves entries past each other, so an index left alone names
+/// a different entry afterwards. When the entry is gone — a tray "Clear" or an
+/// eviction between the rendered frame and the click — the old index is the best
+/// guess left, clamped so a list that got shorter can't leave the highlight past
+/// the end of it.
+///
+/// Split out of [`PopupApp::toggle_favorite`] for the reason
+/// [`selection_after_removal`] is split out of the delete path: in the method it
+/// sits behind a `Mutex` and an `Arc<Shared>`, so none of these cases are
+/// reachable from a test.
+fn selection_after_toggle(selected: usize, moved_to: Option<usize>, len: usize) -> usize {
+    match moved_to {
+        Some(index) => index,
+        None => selected.min(len.saturating_sub(1)),
+    }
+}
+
 /// Collapse a clipboard entry to a single trimmed preview line for the popup.
 ///
 /// Builds the line lazily and stops at [`PREVIEW_MAX_CHARS`]. Flattening the
@@ -915,6 +935,65 @@ mod tests {
         // An empty list has no row to highlight; the clamp must saturate rather
         // than wrap to usize::MAX.
         assert_eq!(selection_after_removal(0, 0, 1), 0);
+    }
+
+    #[test]
+    fn starring_the_highlighted_entry_takes_the_highlight_to_the_top() {
+        // Driven through the real store rather than hand-computed indices: the
+        // point of resolving the entry's new position is that the ordering rules
+        // live there, not here.
+        let mut h = HistoryStore::new(5);
+        h.push("a".into());
+        h.push("b".into());
+        h.push("c".into());
+        // ["c", "b", "a"], highlight on "a" — the last row.
+        h.toggle_favorite("a");
+        assert_eq!(selection_after_toggle(2, h.position("a"), h.len()), 0);
+    }
+
+    #[test]
+    fn starring_another_row_carries_the_highlight_down_with_its_entry() {
+        // "b" keeps its place relative to the rest, but everything below the
+        // newly pinned row is one index further down, so a highlight left alone
+        // would land on the entry that used to be above it.
+        let mut h = HistoryStore::new(5);
+        h.push("a".into());
+        h.push("b".into());
+        h.push("c".into());
+        // ["c", "b", "a"], highlight on "b".
+        h.toggle_favorite("a");
+        // ["a", "c", "b"]
+        assert_eq!(selection_after_toggle(1, h.position("b"), h.len()), 2);
+    }
+
+    #[test]
+    fn a_vanished_entry_leaves_the_highlight_where_it_was() {
+        // Best effort, same as the delete path: land on whatever is at that
+        // index now.
+        assert_eq!(selection_after_toggle(1, None, 5), 1);
+    }
+
+    #[test]
+    fn a_vanished_entry_clamps_into_a_list_that_got_shorter() {
+        // A tray "Clear" between the rendered frame and the click. Past the end,
+        // no row draws the highlight and Enter commits nothing, so the stale
+        // index has to come back into range.
+        assert_eq!(selection_after_toggle(7, None, 2), 1);
+        // And an empty store must saturate rather than wrap to usize::MAX.
+        assert_eq!(selection_after_toggle(7, None, 0), 0);
+    }
+
+    #[test]
+    fn selected_text_reads_the_rendered_snapshot() {
+        let items = vec![
+            history::Entry::new("first", false),
+            history::Entry::new("second", true),
+        ];
+        assert_eq!(selected_text(&items, 1).as_deref(), Some("second"));
+        // A selection index can outlive the snapshot it was resolved against;
+        // out of range must be "nothing chosen", not a panic or a stray entry.
+        assert!(selected_text(&items, 2).is_none());
+        assert!(selected_text(&[], 0).is_none());
     }
 
     #[test]

@@ -634,6 +634,12 @@ impl eframe::App for PopupApp {
                                     egui::vec2(preview_width, row_height),
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
+                                        // Indent the text off the highlight's left
+                                        // edge. The selectable label this replaced
+                                        // carried the same padding inside its own
+                                        // background; painting the highlight by hand
+                                        // means putting it back by hand.
+                                        ui.add_space(ui.spacing().button_padding.x);
                                         let mut text = egui::RichText::new(one_line_preview(item));
                                         if selected {
                                             text = text.color(ui.visuals().selection.stroke.color);

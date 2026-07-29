@@ -602,6 +602,22 @@ impl eframe::App for PopupApp {
                             // `add_sized` is a suggestion, not a clamp.
                             egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
+                                let row_rect = ui.max_rect();
+                                // Reserve a slot in the paint order now, and fill it
+                                // in once the row's state is known: the highlight has
+                                // to land *behind* the preview and the icon, but
+                                // whether to draw it depends on a hover that is only
+                                // known after they have been added.
+                                let highlight = ui.painter().add(egui::Shape::Noop);
+                                // Registered before the delete button so that button,
+                                // added after and therefore on top, keeps its own
+                                // clicks. This response only ever selects or commits.
+                                let row = ui.interact(
+                                    row_rect,
+                                    ui.id().with(("row", idx)),
+                                    egui::Sense::click(),
+                                );
+
                                 // `frame_when_inactive(false)` keeps the icon quiet
                                 // until it's hovered, so the rows don't read as a
                                 // column of buttons.
@@ -614,35 +630,51 @@ impl eframe::App for PopupApp {
 
                                 // Whatever the button left behind, to the pixel.
                                 let preview_width = ui.available_width();
-                                // A plain `selectable_label` would centre its text
-                                // once it's this wide; the explicit layout keeps the
-                                // preview left-aligned and caps the width the text
-                                // is truncated against.
-                                let resp = ui
-                                    .allocate_ui_with_layout(
-                                        egui::vec2(preview_width, row_height),
-                                        egui::Layout::left_to_right(egui::Align::Center)
-                                            .with_main_align(egui::Align::Min),
-                                        |ui| {
-                                            ui.add(
-                                                egui::Button::selectable(
-                                                    selected,
-                                                    one_line_preview(item),
-                                                )
-                                                .truncate()
-                                                .min_size(egui::vec2(preview_width, 0.0)),
-                                            )
-                                        },
-                                    )
-                                    .inner;
-                                if resp.clicked() {
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(preview_width, row_height),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        let mut text = egui::RichText::new(one_line_preview(item));
+                                        if selected {
+                                            text = text.color(ui.visuals().selection.stroke.color);
+                                        }
+                                        // Not a `selectable_label`: the row paints its
+                                        // own highlight below, across the icon too, so
+                                        // the preview is just text. `selectable(false)`
+                                        // keeps it from taking the click as a
+                                        // text-selection drag.
+                                        ui.add(egui::Label::new(text).truncate().selectable(false));
+                                    },
+                                );
+
+                                // `contains_pointer` rather than `hovered`: the delete
+                                // button sits on top of this rect, and hovering it must
+                                // not make the row's highlight blink out.
+                                if selected || row.contains_pointer() {
+                                    let visuals = ui.visuals();
+                                    let fill = if selected {
+                                        visuals.selection.bg_fill
+                                    } else {
+                                        visuals.widgets.hovered.weak_bg_fill
+                                    };
+                                    ui.painter().set(
+                                        highlight,
+                                        egui::Shape::rect_filled(
+                                            row_rect,
+                                            visuals.widgets.hovered.corner_radius,
+                                            fill,
+                                        ),
+                                    );
+                                }
+
+                                if row.clicked() {
                                     self.selected = idx;
                                     commit = true;
                                 }
                                 // Only follow the selection when it actually moved, so
                                 // the mouse wheel isn't fighting a re-center every frame.
                                 if selected && self.scroll_to_selection {
-                                    resp.scroll_to_me(Some(egui::Align::Center));
+                                    row.scroll_to_me(Some(egui::Align::Center));
                                 }
                             },
                         );

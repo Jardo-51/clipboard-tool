@@ -246,6 +246,27 @@ fn save_history(shared: &Shared) {
     }
 }
 
+/// Write the history out now instead of leaving it to the persistence timer.
+///
+/// Deletions use this; `push` doesn't. A copy that doesn't survive a crash is a
+/// non-event, so recording one can wait for the next [`PERSIST_INTERVAL`] tick.
+/// A delete is the opposite: it's the operation a user reaches for specifically
+/// to get something — a password, a token — *out* of a file on disk, and
+/// leaving it in `history.json` for five seconds, or permanently if the process
+/// is killed in that window, fails the thing the button is for.
+///
+/// The write is a blocking one of up to `history_size` × `MAX_ITEM_BYTES`, and
+/// every caller is on a UI thread (egui's or GTK's), so it goes to a thread of
+/// its own.
+fn flush_history(shared: &Arc<Shared>) {
+    // This save supersedes the pending one the caller's `dirty` would have
+    // triggered. A change racing the write just re-sets the flag, so the worst
+    // case is one redundant save on the next tick, never a lost one.
+    shared.dirty.store(false, Ordering::SeqCst);
+    let shared = Arc::clone(shared);
+    std::thread::spawn(move || save_history(&shared));
+}
+
 /// Flush a dirty history to disk at a low frequency, so frequent copies don't
 /// each trigger a write.
 fn spawn_persistence(shared: Arc<Shared>) {
@@ -462,7 +483,8 @@ impl PopupApp {
         if !removed {
             return;
         }
-        self.shared.dirty.store(true, Ordering::SeqCst);
+        // Straight to disk rather than via `dirty` — see [`flush_history`].
+        flush_history(&self.shared);
 
         // Everything below the deleted row shifted up by one, so follow it to
         // stay on the same entry. Deleting the highlighted row itself leaves the

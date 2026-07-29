@@ -107,7 +107,9 @@ pub fn spawn(shared: Arc<Shared>, ctx: egui::Context) {
                 if let Ok(mut h) = shared.history.lock() {
                     h.clear();
                 }
-                shared.dirty.store(true, Ordering::SeqCst);
+                // Emptied history goes to disk immediately, for the same reason
+                // the popup's per-row delete does — see `crate::flush_history`.
+                crate::flush_history(&shared);
             } else if id == autostart_id {
                 match crate::autostart::toggle() {
                     Ok(now) => autostart_item.set_checked(now),

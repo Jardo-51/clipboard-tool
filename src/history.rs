@@ -56,8 +56,12 @@ impl Entry {
 /// that starring an item is a promise it will still be there later — otherwise a
 /// busy hour of copying would silently evict the very entries the user marked as
 /// worth keeping, which is the one thing the star is for. That leaves the
-/// footprint bounded by (`capacity` + favorites) × [`MAX_ITEM_BYTES`], and
-/// favorites only grow by an explicit click each.
+/// footprint bounded by (`capacity` + favorites) × [`MAX_ITEM_BYTES`], where the
+/// favorites grow by an explicit click each — except through [`restore`], which
+/// takes as many as `history.json` holds. Capping them there would mean throwing
+/// away starred items on the way in, which is the promise this exemption exists
+/// to keep; a file with more favorites than anyone would click is a hand-edited
+/// one, and [`MAX_ITEM_BYTES`] still bounds each of them.
 ///
 /// The bound on the non-favorite block is enforced by [`push`], not on every
 /// mutation: [`toggle_favorite`] deliberately lets the block sit over `capacity`
@@ -67,6 +71,7 @@ impl Entry {
 ///
 /// [`favorite_count`]: Self::favorite_count
 /// [`push`]: Self::push
+/// [`restore`]: Self::restore
 /// [`toggle_favorite`]: Self::toggle_favorite
 pub struct HistoryStore {
     items: VecDeque<Entry>,

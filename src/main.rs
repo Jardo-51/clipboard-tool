@@ -42,6 +42,13 @@ use history::HistoryStore;
 /// button joined the trash icon at the end of each row.
 const POPUP_WIDTH: f32 = 520.0;
 const POPUP_HEIGHT: f32 = 340.0;
+/// The size the window is born at, before [`PopupApp::logic`] grows it to the
+/// real one. eframe puts the window on screen once by itself no matter what the
+/// app asked for (see the note there), so the startup dance is about having as
+/// little of it to see as possible: a single point cannot be told from nothing.
+/// A window may not be zero-sized — X11 rejects it and egui clamps the command
+/// to 1 — so one point is the floor.
+const POPUP_INITIAL_SIZE: f32 = 1.0;
 /// Padding between the popup's contents and the window edge, in points. The
 /// window is undecorated, so nothing else keeps the rows off the border.
 const POPUP_MARGIN: i8 = 8;
@@ -142,8 +149,15 @@ fn main() -> eframe::Result<()> {
     // --- egui popup ------------------------------------------------------
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([POPUP_WIDTH, POPUP_HEIGHT])
-            .with_min_inner_size([POPUP_WIDTH, POPUP_HEIGHT])
+            // Not the real size: the window starts as a single point and is
+            // grown to [`POPUP_WIDTH`] × [`POPUP_HEIGHT`] just before the first
+            // show — see [`PopupApp::logic`]. No minimum size is asked for
+            // here for the same reason (it would be a floor the initial size
+            // sits under, and the window manager would enlarge the window to
+            // meet it); `with_resizable(false)` makes winit pin the minimum and
+            // the maximum to whatever size is requested, so the grown window
+            // ends up clamped to its real size just the same.
+            .with_inner_size([POPUP_INITIAL_SIZE, POPUP_INITIAL_SIZE])
             .with_decorations(false)
             .with_always_on_top()
             .with_resizable(false)
@@ -405,6 +419,9 @@ struct PopupApp {
     visible: bool,
     /// False until the first `logic` frame has enforced the hidden state.
     initialized: bool,
+    /// False until the window has been grown from the point-sized one it is
+    /// born as to [`POPUP_WIDTH`] × [`POPUP_HEIGHT`]. See [`PopupApp::logic`].
+    grown: bool,
     /// Whether the popup has actually held keyboard focus since it was last
     /// shown. Used to defer the focus-loss auto-dismiss until *after* the
     /// window manager has granted focus, so the popup doesn't hide itself on
@@ -424,6 +441,7 @@ impl PopupApp {
             selected: 0,
             visible: false,
             initialized: false,
+            grown: false,
             focused_once: false,
             scroll_to_selection: false,
         }
@@ -555,14 +573,47 @@ impl eframe::App for PopupApp {
     /// trigger must live here: it sends `Visible(true)`, and only on the next
     /// frame — once the viewport is visible — does `ui` start being called.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Some window managers ignore `ViewportBuilder::with_visible(false)` and
-        // map the window anyway, leaving a blank popup on screen at startup.
-        // Enforce the hidden state once, up front.
+        // `ViewportBuilder::with_visible(false)` only holds until the first
+        // frame is painted: eframe's `post_rendering` then calls
+        // `set_visible(true)` unconditionally, on the reasoning that a window
+        // should not be shown before it has something in it. Nothing the app
+        // sends can get in front of that — viewport commands are processed at
+        // the end of a frame, after the paint they follow — so the window is
+        // going to be put on screen once, and asking for it back is the only
+        // answer available. Do that here, on the first frame.
         if !self.initialized {
             self.initialized = true;
             if !self.visible {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
+        }
+
+        // That map-then-unmap pair is what the user sees as a flash at startup,
+        // and it is the reason the window is born one point across
+        // ([`POPUP_INITIAL_SIZE`]) rather than at its real size: a window that
+        // small cannot be told from no window at all. Growing it back waits for
+        // the first show, which is the first moment the window is known to be
+        // off screen. The hide above is not that moment: it is a request, and
+        // the unmap that answers it was measured arriving some 70ms and half a
+        // dozen frames later — a resize sent in that gap lands while the window
+        // is still on screen and puts the full-sized flash right back.
+        //
+        // The show itself is then left pending for a frame rather than done
+        // here, because this frame's layout was taken from the old size before
+        // `logic` ran: showing now would map a full-sized window over a
+        // point-sized painting of it. Only the first show pays that frame —
+        // eframe forces the window on screen once, so once grown it stays.
+        if !self.grown && self.shared.show_requested.load(Ordering::SeqCst) {
+            self.grown = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                POPUP_WIDTH,
+                POPUP_HEIGHT,
+            )));
+            // The popup is event-driven and the hotkey's own repaint has been
+            // spent on this frame, so without this it would idle here — one
+            // point across, with a show still pending.
+            ctx.request_repaint();
+            return;
         }
 
         if self.shared.show_requested.swap(false, Ordering::SeqCst) {

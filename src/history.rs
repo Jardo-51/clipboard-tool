@@ -248,22 +248,35 @@ impl HistoryStore {
     /// Entries over [`MAX_ITEM_BYTES`] are dropped here too, so a `history.json`
     /// written before the cap existed can't reintroduce them.
     ///
-    /// Duplicates are dropped for the same reason, keeping the first
-    /// occurrence: [`remove`] identifies an entry by its contents and documents
-    /// that at most one can match, and a file that was hand-written rather than
-    /// produced by [`snapshot`] is under no obligation to be unique. With
-    /// duplicates loaded, deleting the second of two identical rows would take
-    /// out the first and leave the row the user clicked sitting there.
+    /// Duplicates are collapsed for the same reason, onto the first occurrence:
+    /// [`remove`] identifies an entry by its contents and documents that at most
+    /// one can match, and a file that was hand-written rather than produced by
+    /// [`snapshot`] is under no obligation to be unique. With duplicates loaded,
+    /// deleting the second of two identical rows would take out the first and
+    /// leave the row the user clicked sitting there.
+    ///
+    /// Collapsing merges the star rather than taking it from whichever copy came
+    /// first: a file holding `"dup"` unstarred above `"dup"` starred is asking
+    /// for one entry that is starred, and dropping the flag on the way in is the
+    /// part of a duplicate the user would actually notice.
     ///
     /// [`remove`]: Self::remove
     /// [`snapshot`]: Self::snapshot
     pub fn restore(&mut self, items: Vec<Entry>) {
-        let mut seen = std::collections::HashSet::new();
-        let (favorites, rest): (Vec<Entry>, Vec<Entry>) = items
-            .into_iter()
-            .filter(|e| e.text.len() <= MAX_ITEM_BYTES)
-            .filter(|e| seen.insert(e.text.clone()))
-            .partition(|e| e.favorite);
+        let mut merged: Vec<Entry> = Vec::new();
+        let mut first_seen: std::collections::HashMap<Arc<str>, usize> =
+            std::collections::HashMap::new();
+        for entry in items.into_iter().filter(|e| e.text.len() <= MAX_ITEM_BYTES) {
+            match first_seen.get(&entry.text) {
+                Some(&at) => merged[at].favorite |= entry.favorite,
+                None => {
+                    first_seen.insert(entry.text.clone(), merged.len());
+                    merged.push(entry);
+                }
+            }
+        }
+        let (favorites, rest): (Vec<Entry>, Vec<Entry>) =
+            merged.into_iter().partition(|e| e.favorite);
         self.items = favorites
             .into_iter()
             .chain(rest.into_iter().take(self.capacity))
@@ -429,6 +442,26 @@ mod tests {
         assert_eq!(texts(&h), ["dup", "unique"]);
         assert!(h.remove("dup"));
         assert!(!h.remove("dup"), "no second copy may be left behind");
+    }
+
+    #[test]
+    fn restore_keeps_a_star_carried_by_either_copy_of_a_duplicate() {
+        // Only a hand-edited or downgrade-era file can hold two copies of one
+        // entry — tolerating exactly those is why `restore` rebuilds the order
+        // at all — and the star is the part of a collapsed duplicate the user
+        // would notice going missing, whichever copy carried it.
+        let mut h = HistoryStore::new(5);
+        h.restore(vec![
+            Entry::new("dup", false),
+            Entry::new("other", false),
+            Entry::new("dup", true),
+        ]);
+        assert_eq!(texts(&h), ["dup", "other"]);
+        assert_eq!(flags(&h), [true, false]);
+
+        h.restore(vec![Entry::new("dup", true), Entry::new("dup", false)]);
+        assert_eq!(texts(&h), ["dup"]);
+        assert_eq!(flags(&h), [true]);
     }
 
     #[test]

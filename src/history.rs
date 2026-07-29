@@ -204,7 +204,9 @@ impl HistoryStore {
         self.items.get(index)
     }
 
-    #[allow(dead_code)] // test-only helper; the UI reads the length off its snapshot
+    /// The UI otherwise reads the length off its snapshot; this is for the one
+    /// caller that has to ask the store itself, because it is deciding whether
+    /// an index taken from an older snapshot is still in range.
     pub fn len(&self) -> usize {
         self.items.len()
     }

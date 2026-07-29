@@ -510,9 +510,15 @@ impl PopupApp {
     /// highlight's index means something different afterwards, and leaving it
     /// alone would silently move it to a different entry. `selected` is the
     /// entry it was on in the snapshot that was clicked; the store is asked
-    /// where that entry sits now. It can be gone (the watcher's de-duplication
-    /// or a tray "Clear" ran in between), in which case the index stays put and
-    /// lands on whatever is there — the same best effort the delete path makes.
+    /// where that entry sits now.
+    ///
+    /// That entry can be gone — a tray "Clear" or the watcher's eviction ran
+    /// between the frame that drew the row and this click — and the store can
+    /// have got shorter with it. Landing on whatever is at the old index is the
+    /// same best effort the delete path makes, but only once the index is back
+    /// in range: past the end, no row draws the highlight at all and Enter
+    /// commits nothing, so the selection appears to vanish for no visible
+    /// reason.
     fn toggle_favorite(&mut self, item: &str, selected: Option<Arc<str>>) {
         let Ok(mut history) = self.shared.history.lock() else {
             return;
@@ -520,8 +526,9 @@ impl PopupApp {
         if !history.toggle_favorite(item) {
             return;
         }
-        if let Some(index) = selected.and_then(|text| history.position(&text)) {
-            self.selected = index;
+        match selected.and_then(|text| history.position(&text)) {
+            Some(index) => self.selected = index,
+            None => self.selected = self.selected.min(history.len().saturating_sub(1)),
         }
         drop(history);
 

@@ -19,12 +19,16 @@ actually look at. Verified on a Linux host with a live X session.
    dies with `Wgpu(CreateSurfaceError(... FailedToCreateSurfaceForAnyBackend))`.
    The dev shell is what supplies mesa, `LIBGL_DRIVERS_PATH`, and
    `VK_DRIVER_FILES` (lavapipe as the software fallback) — see `flake.nix`.
-2. **Never send Enter to the popup, and never click a row's preview.** Both run
-   `commit_selection`, which puts the entry on the real clipboard and
-   synthesizes a real paste into whichever window regains focus. On a live
-   desktop that types into the user's editor or browser. Dismiss with
-   **Escape**. The per-row trash button is safe to click — it only edits the
-   throwaway history — but it sits a few pixels from the preview, so read
+2. **Never send Enter to the popup, and never click a row anywhere but its
+   trash button.** Both run `commit_selection`, which puts the entry on the real
+   clipboard and synthesizes a real paste into whichever window regains focus.
+   On a live desktop that types into the user's editor or browser. The whole row
+   commits, not just the preview text: `ui.interact(row_rect, …)` in `main.rs`
+   senses clicks across the row's full width, so the empty space between the end
+   of a short preview and the trash icon commits too — and that gap is exactly
+   where a near-miss aimed at the icon lands. Dismiss with **Escape**. The
+   per-row trash button is safe to click — it only edits the throwaway history —
+   but it sits a few pixels from the rest of the row, which commits, so read
    "Driving the mouse" below before aiming at it.
 3. **Sandbox the XDG dirs.** Without this the app reads and rewrites the user's
    real clipboard history at `~/.local/share/clipboard-tool/history.json` —
@@ -188,10 +192,13 @@ DISPLAY=:2 xdotool click 1
 ```
 
 The trash button draws a frame and a "Remove from history" tooltip under the
-pointer, so the screenshot tells you whether you are on the button or on the
-preview next to it — and clicking the preview pastes into the user's desktop
-(rule 2). A missed click also focuses another window, which makes the popup
-auto-dismiss on focus loss; that is correct behaviour, not a bug to chase.
+pointer, so the screenshot tells you whether you are on the button or on the row
+around it — and anywhere on that row other than the button commits, pasting into
+the user's desktop (rule 2). Do not treat a near-miss as harmless: a click that
+lands a few pixels short of the icon is still inside the row, so it pastes. Only
+a click that misses the popup entirely is inert — that one focuses another
+window and the popup auto-dismisses on focus loss, which is correct behaviour,
+not a bug to chase.
 
 ## Step 7 — Clean up
 

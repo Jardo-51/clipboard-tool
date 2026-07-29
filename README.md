@@ -241,11 +241,10 @@ Project layout:
 
 ```
 src/
-  main.rs        # daemon wiring, session detection, CLI, event loop
+  main.rs        # daemon wiring, session detection, CLI, event loop, egui popup
   history.rs     # capped, de-duplicating ring buffer
   config.rs      # config.toml load/defaults, hotkey parsing
   persist.rs     # JSON history load/save (atomic)
-  ui/…           # (popup lives in main.rs today)
   platform/
     mod.rs       # session detection + backend selection
     inject.rs    # enigo-based paste injection

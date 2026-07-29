@@ -4,9 +4,10 @@
 //! capped, de-duplicating history. A global hotkey (`Ctrl+Shift+V` by default)
 //! shows a centered egui popup of the recent items: arrow keys navigate, Enter
 //! puts the chosen entry back on the clipboard and synthesizes a paste into the
-//! window that had focus, Esc or clicking away dismisses it. A tray icon offers
-//! the same actions, and the history is restored across restarts unless
-//! `persist` is turned off in `config.toml`.
+//! window that had focus, the trash icon on a row drops that entry, and Esc or
+//! clicking away dismisses it. A tray icon offers the same actions, and the
+//! history is restored across restarts unless `persist` is turned off in
+//! `config.toml`.
 //!
 //! This module owns the shared state and the wiring between those threads; the
 //! pieces live in [`history`], [`persist`], [`config`], [`tray`], [`autostart`],
@@ -559,16 +560,16 @@ impl eframe::App for PopupApp {
             return;
         }
 
-        // --- Render (into the central Ui eframe provides) ---
-        // That `Ui` comes with no margin, so without a frame the heading and the
-        // rows would sit flush against the edge of this undecorated window. Only
-        // the margin is wanted here: a filled frame (`Frame::central_panel`)
-        // shrinks to its content, which two-tones the window below the last row.
         // The row whose delete button was pressed this frame, as (index in the
         // snapshot, contents). Applied after rendering, so the store isn't
         // mutated while the list built from it is still being drawn.
         let mut to_remove: Option<(usize, Arc<str>)> = None;
 
+        // --- Render (into the central Ui eframe provides) ---
+        // That `Ui` comes with no margin, so without a frame the heading and the
+        // rows would sit flush against the edge of this undecorated window. Only
+        // the margin is wanted here: a filled frame (`Frame::central_panel`)
+        // shrinks to its content, which two-tones the window below the last row.
         egui::Frame::new()
             .inner_margin(POPUP_MARGIN)
             .show(ui, |ui| {
@@ -612,6 +613,9 @@ impl eframe::App for PopupApp {
                                 // Registered before the delete button so that button,
                                 // added after and therefore on top, keeps its own
                                 // clicks. This response only ever selects or commits.
+                                // The id has to be spelled out and unique per row:
+                                // `interact` doesn't allocate, so it can't draw one
+                                // from the layout the way an added widget does.
                                 let row = ui.interact(
                                     row_rect,
                                     ui.id().with(("row", idx)),
@@ -689,9 +693,17 @@ impl eframe::App for PopupApp {
             });
         self.scroll_to_selection = false;
 
+        // Deleting is handled before committing, and returns rather than falling
+        // through. Keep it that way: the two are driven by separate responses over
+        // overlapping rectangles, so a click that somehow registered on both would
+        // otherwise delete the entry *and* commit — and committing synthesizes a
+        // real paste into whatever window regains focus. Losing a click is a
+        // non-event; pasting into the user's editor because they aimed at a trash
+        // icon is not. The early return is also what keeps the now-stale snapshot
+        // from being used: the store is redrawn from scratch next frame.
         if let Some((idx, item)) = to_remove {
             self.remove_item(idx, &item, len);
-            return; // the snapshot is stale now; redraw from the store next frame
+            return;
         }
 
         if commit {

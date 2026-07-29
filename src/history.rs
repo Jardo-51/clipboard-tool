@@ -73,6 +73,23 @@ impl HistoryStore {
         true
     }
 
+    /// Drop the entry whose contents equal `value`, returning `true` if one was
+    /// removed.
+    ///
+    /// Matching on contents rather than on an index is deliberate. The popup
+    /// acts on a snapshot it rendered, and the watcher thread prepends on every
+    /// clipboard change, so an index from that snapshot can address a different
+    /// entry by the time the click is handled — deleting the neighbour of the
+    /// row the user aimed at. Contents are unique here (`push` de-duplicates),
+    /// so at most one entry can match.
+    pub fn remove(&mut self, value: &str) -> bool {
+        let Some(pos) = self.items.iter().position(|v| v.as_ref() == value) else {
+            return false;
+        };
+        self.items.remove(pos);
+        true
+    }
+
     #[allow(dead_code)] // test-only helper; the UI reads items through `iter`
     pub fn get(&self, index: usize) -> Option<&Arc<str>> {
         self.items.get(index)
@@ -106,10 +123,22 @@ impl HistoryStore {
     ///
     /// Entries over [`MAX_ITEM_BYTES`] are dropped here too, so a `history.json`
     /// written before the cap existed can't reintroduce them.
+    ///
+    /// Duplicates are dropped for the same reason, keeping the first (newest)
+    /// occurrence: [`remove`] identifies an entry by its contents and documents
+    /// that at most one can match, and a file that was hand-written rather than
+    /// produced by [`snapshot`] is under no obligation to be unique. With
+    /// duplicates loaded, deleting the second of two identical rows would take
+    /// out the first and leave the row the user clicked sitting there.
+    ///
+    /// [`remove`]: Self::remove
+    /// [`snapshot`]: Self::snapshot
     pub fn restore(&mut self, items: Vec<String>) {
+        let mut seen = std::collections::HashSet::new();
         self.items = items
             .into_iter()
             .filter(|s| s.len() <= MAX_ITEM_BYTES)
+            .filter(|s| seen.insert(s.clone()))
             .take(self.capacity)
             .map(Arc::from)
             .collect();
@@ -193,6 +222,38 @@ mod tests {
     }
 
     #[test]
+    fn remove_drops_only_the_named_entry() {
+        let mut h = HistoryStore::new(5);
+        h.push("a".into());
+        h.push("b".into());
+        h.push("c".into());
+        assert!(h.remove("b"));
+        assert_eq!(h.len(), 2);
+        assert_eq!(h.get(0).unwrap().as_ref(), "c");
+        assert_eq!(h.get(1).unwrap().as_ref(), "a");
+    }
+
+    #[test]
+    fn remove_reports_a_miss() {
+        // The popup can ask for an entry the watcher or a "Clear" already took
+        // out; that must be a no-op rather than disturbing the rest.
+        let mut h = HistoryStore::new(5);
+        h.push("a".into());
+        assert!(!h.remove("gone"));
+        assert_eq!(h.len(), 1);
+    }
+
+    #[test]
+    fn removed_entries_can_be_recorded_again() {
+        let mut h = HistoryStore::new(5);
+        h.push("a".into());
+        assert!(h.remove("a"));
+        assert!(h.is_empty());
+        assert!(h.push("a".into()));
+        assert_eq!(h.get(0).unwrap().as_ref(), "a");
+    }
+
+    #[test]
     fn restore_truncates_to_capacity() {
         // A saved history can be longer than the configured history_size (the
         // user shrank it between runs), and restore documents that it keeps the
@@ -217,6 +278,24 @@ mod tests {
         h.restore(vec!["from disk".to_string()]);
         assert_eq!(h.len(), 1);
         assert_eq!(h.get(0).unwrap().as_ref(), "from disk");
+    }
+
+    #[test]
+    fn restore_drops_duplicates() {
+        // `remove` matches on contents and relies on them being unique. A
+        // hand-written history.json isn't obliged to be, so the de-duplication
+        // has to happen on the way in — keeping the newest occurrence.
+        let mut h = HistoryStore::new(5);
+        h.restore(vec![
+            "dup".to_string(),
+            "unique".to_string(),
+            "dup".to_string(),
+        ]);
+        assert_eq!(h.len(), 2);
+        assert_eq!(h.get(0).unwrap().as_ref(), "dup");
+        assert_eq!(h.get(1).unwrap().as_ref(), "unique");
+        assert!(h.remove("dup"));
+        assert!(!h.remove("dup"), "no second copy may be left behind");
     }
 
     #[test]

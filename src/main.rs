@@ -4,9 +4,10 @@
 //! capped, de-duplicating history. A global hotkey (`Ctrl+Shift+V` by default)
 //! shows a centered egui popup of the recent items: arrow keys navigate, Enter
 //! puts the chosen entry back on the clipboard and synthesizes a paste into the
-//! window that had focus, Esc or clicking away dismisses it. A tray icon offers
-//! the same actions, and the history is restored across restarts unless
-//! `persist` is turned off in `config.toml`.
+//! window that had focus, the trash icon on a row drops that entry, and Esc or
+//! clicking away dismisses it. A tray icon offers the same actions, and the
+//! history is restored across restarts unless `persist` is turned off in
+//! `config.toml`.
 //!
 //! This module owns the shared state and the wiring between those threads; the
 //! pieces live in [`history`], [`persist`], [`config`], [`tray`], [`autostart`],
@@ -39,6 +40,9 @@ use history::HistoryStore;
 
 const POPUP_WIDTH: f32 = 460.0;
 const POPUP_HEIGHT: f32 = 340.0;
+/// Padding between the popup's contents and the window edge, in points. The
+/// window is undecorated, so nothing else keeps the rows off the border.
+const POPUP_MARGIN: i8 = 8;
 /// Grace period after hiding the popup before synthesizing the paste, so the
 /// OS can return focus to the previously active window.
 const FOCUS_RETURN_DELAY: Duration = Duration::from_millis(120);
@@ -46,6 +50,12 @@ const FOCUS_RETURN_DELAY: Duration = Duration::from_millis(120);
 const PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 /// Longest preview line shown per history row, in characters.
 const PREVIEW_MAX_CHARS: usize = 80;
+/// Glyph for the per-row delete button. U+1F5D1 is carried by the bundled
+/// `emoji-icon-font`, which egui's default fonts fall back to.
+const DELETE_ICON: &str = "🗑";
+/// Breathing room between the delete icons and whatever is to their right — the
+/// scroll bar when the list overflows, the window margin when it doesn't.
+const ROW_TRAILING_GAP: f32 = 6.0;
 
 /// Shared application state between the clipboard-watcher thread, the
 /// hotkey-listener thread, the tray thread, and the egui UI thread.
@@ -234,6 +244,27 @@ fn save_history(shared: &Shared) {
     if let Err(e) = persist::save(path, &items) {
         eprintln!("failed to save history to {}: {e}", path.display());
     }
+}
+
+/// Write the history out now instead of leaving it to the persistence timer.
+///
+/// Deletions use this; `push` doesn't. A copy that doesn't survive a crash is a
+/// non-event, so recording one can wait for the next [`PERSIST_INTERVAL`] tick.
+/// A delete is the opposite: it's the operation a user reaches for specifically
+/// to get something — a password, a token — *out* of a file on disk, and
+/// leaving it in `history.json` for five seconds, or permanently if the process
+/// is killed in that window, fails the thing the button is for.
+///
+/// The write is a blocking one of up to `history_size` × `MAX_ITEM_BYTES`, and
+/// every caller is on a UI thread (egui's or GTK's), so it goes to a thread of
+/// its own.
+fn flush_history(shared: &Arc<Shared>) {
+    // This save supersedes the pending one the caller's `dirty` would have
+    // triggered. A change racing the write just re-sets the flag, so the worst
+    // case is one redundant save on the next tick, never a lost one.
+    shared.dirty.store(false, Ordering::SeqCst);
+    let shared = Arc::clone(shared);
+    std::thread::spawn(move || save_history(&shared));
 }
 
 /// Flush a dirty history to disk at a low frequency, so frequent copies don't
@@ -433,6 +464,35 @@ impl PopupApp {
             });
         }
     }
+
+    /// Drop the history entry the user clicked the trash icon on, and keep the
+    /// highlight on a sensible row.
+    ///
+    /// `rendered_index` and `rendered_len` describe the snapshot the click
+    /// happened on, not the store: the watcher thread can have prepended in the
+    /// meantime. They're only used to move the highlight — the entry itself is
+    /// identified by its contents (see [`HistoryStore::remove`]), so the wrong
+    /// item can't be deleted, at worst the highlight lands a row off.
+    fn remove_item(&mut self, rendered_index: usize, item: &str, rendered_len: usize) {
+        let removed = self
+            .shared
+            .history
+            .lock()
+            .map(|mut h| h.remove(item))
+            .unwrap_or(false);
+        if !removed {
+            return;
+        }
+        // Straight to disk rather than via `dirty` — see [`flush_history`].
+        flush_history(&self.shared);
+
+        self.selected = selection_after_removal(self.selected, rendered_index, rendered_len);
+        // Same as every other path that moves the highlight: the new row is
+        // usually adjacent to one that was on screen, but deleting near the top
+        // of the viewport while the selection sits below the fold would
+        // otherwise move it out of view.
+        self.scroll_to_selection = true;
+    }
 }
 
 impl eframe::App for PopupApp {
@@ -520,34 +580,178 @@ impl eframe::App for PopupApp {
             return;
         }
 
+        // The row whose delete button was pressed this frame, as (index in the
+        // snapshot, contents). Applied after rendering, so the store isn't
+        // mutated while the list built from it is still being drawn.
+        let mut to_remove: Option<(usize, Arc<str>)> = None;
+
         // --- Render (into the central Ui eframe provides) ---
-        ui.heading("Clipboard history");
-        ui.separator();
-        if len == 0 {
-            ui.label("No items yet — copy something.");
+        // That `Ui` comes with no margin, so without a frame the heading and the
+        // rows would sit flush against the edge of this undecorated window. Only
+        // the margin is wanted here: a filled frame (`Frame::central_panel`)
+        // shrinks to its content, which two-tones the window below the last row.
+        egui::Frame::new()
+            .inner_margin(POPUP_MARGIN)
+            .show(ui, |ui| {
+                ui.heading("Clipboard history");
+                ui.separator();
+                if len == 0 {
+                    ui.label("No items yet — copy something.");
+                    return;
+                }
+                // egui's default scroll bar floats *over* the content and swells
+                // from 2 to 6 points while hovered, which puts it on top of the
+                // delete icons at the right edge. A solid bar allocates its own
+                // width instead, so the rows end where it begins.
+                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let row_height = ui.spacing().interact_size.y;
+                    // Measured once, outside the loop, and reused for every row.
+                    // Reading it per row instead lets any row that overflows widen
+                    // the scroll area's content, which widens the next row's
+                    // measurement in turn — the delete buttons then walk right
+                    // down the list until they fall off the window.
+                    let row_width = (ui.available_width() - ROW_TRAILING_GAP).max(0.0);
+                    for (idx, item) in items.iter().enumerate() {
+                        let selected = idx == self.selected;
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(row_width, row_height),
+                            // Right-to-left: the delete button is placed first and
+                            // so keeps the right edge whatever width the glyph and
+                            // its padding actually come to. Sizing a column for it
+                            // up front and hoping the button fits is what drifted —
+                            // `add_sized` is a suggestion, not a clamp.
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                let row_rect = ui.max_rect();
+                                // Reserve a slot in the paint order now, and fill it
+                                // in once the row's state is known: the highlight has
+                                // to land *behind* the preview and the icon, but
+                                // whether to draw it depends on a hover that is only
+                                // known after they have been added.
+                                let highlight = ui.painter().add(egui::Shape::Noop);
+                                // Registered before the delete button so that button,
+                                // added after and therefore on top, keeps its own
+                                // clicks. This response only ever selects or commits.
+                                // The id has to be spelled out and unique per row:
+                                // `interact` doesn't allocate, so it can't draw one
+                                // from the layout the way an added widget does.
+                                let row = ui.interact(
+                                    row_rect,
+                                    ui.id().with(("row", idx)),
+                                    egui::Sense::click(),
+                                );
+
+                                // `frame_when_inactive(false)` keeps the icon quiet
+                                // until it's hovered, so the rows don't read as a
+                                // column of buttons.
+                                let delete = ui
+                                    .add(egui::Button::new(DELETE_ICON).frame_when_inactive(false))
+                                    .on_hover_text("Remove from history");
+                                if delete.clicked() {
+                                    to_remove = Some((idx, item.clone()));
+                                }
+
+                                // Whatever the button left behind, to the pixel.
+                                let preview_width = ui.available_width();
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(preview_width, row_height),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        // Indent the text off the highlight's left
+                                        // edge. The selectable label this replaced
+                                        // carried the same padding inside its own
+                                        // background; painting the highlight by hand
+                                        // means putting it back by hand.
+                                        ui.add_space(ui.spacing().button_padding.x);
+                                        let mut text = egui::RichText::new(one_line_preview(item));
+                                        if selected {
+                                            text = text.color(ui.visuals().selection.stroke.color);
+                                        }
+                                        // Not a `selectable_label`: the row paints its
+                                        // own highlight below, across the icon too, so
+                                        // the preview is just text. `selectable(false)`
+                                        // keeps it from taking the click as a
+                                        // text-selection drag.
+                                        ui.add(egui::Label::new(text).truncate().selectable(false));
+                                    },
+                                );
+
+                                // `contains_pointer` rather than `hovered`: the delete
+                                // button sits on top of this rect, and hovering it must
+                                // not make the row's highlight blink out.
+                                if selected || row.contains_pointer() {
+                                    let visuals = ui.visuals();
+                                    let fill = if selected {
+                                        visuals.selection.bg_fill
+                                    } else {
+                                        visuals.widgets.hovered.weak_bg_fill
+                                    };
+                                    ui.painter().set(
+                                        highlight,
+                                        egui::Shape::rect_filled(
+                                            row_rect,
+                                            visuals.widgets.hovered.corner_radius,
+                                            fill,
+                                        ),
+                                    );
+                                }
+
+                                if row.clicked() {
+                                    self.selected = idx;
+                                    commit = true;
+                                }
+                                // Only follow the selection when it actually moved, so
+                                // the mouse wheel isn't fighting a re-center every frame.
+                                if selected && self.scroll_to_selection {
+                                    row.scroll_to_me(Some(egui::Align::Center));
+                                }
+                            },
+                        );
+                    }
+                });
+            });
+        self.scroll_to_selection = false;
+
+        // Deleting is handled before committing, and returns rather than falling
+        // through. Keep it that way: the two are driven by separate responses over
+        // overlapping rectangles, so a click that somehow registered on both would
+        // otherwise delete the entry *and* commit — and committing synthesizes a
+        // real paste into whatever window regains focus. Losing a click is a
+        // non-event; pasting into the user's editor because they aimed at a trash
+        // icon is not. The early return is also what keeps the now-stale snapshot
+        // from being used: the store is redrawn from scratch next frame.
+        if let Some((idx, item)) = to_remove {
+            self.remove_item(idx, &item, len);
             return;
         }
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for (idx, item) in items.iter().enumerate() {
-                let selected = idx == self.selected;
-                let resp = ui.selectable_label(selected, one_line_preview(item));
-                if resp.clicked() {
-                    self.selected = idx;
-                    commit = true;
-                }
-                // Only follow the selection when it actually moved, so the
-                // mouse wheel isn't fighting a re-center every frame.
-                if selected && self.scroll_to_selection {
-                    resp.scroll_to_me(Some(egui::Align::Center));
-                }
-            }
-        });
-        self.scroll_to_selection = false;
 
         if commit {
             self.commit_selection(&ctx, items.get(self.selected).cloned());
         }
     }
+}
+
+/// Where the highlight should land after the row at `removed` is dropped from a
+/// list that was `rendered_len` long.
+///
+/// Everything below the deleted row shifts up by one, so a selection below it
+/// follows to stay on the same entry. Deleting the highlighted row itself leaves
+/// the index alone, which lands on what was the next entry — except at the end
+/// of the list, where there is no next entry and the highlight clamps to the new
+/// last row (`rendered_len - 2`). Deleting the only entry leaves nothing to
+/// highlight and the clamp saturates to 0.
+///
+/// Split out of [`PopupApp::remove_item`] to be testable: it's the one piece of
+/// the delete path whose off-by-one behaviour isn't obvious by inspection, and
+/// getting it wrong shows up only as a highlight on the wrong row.
+fn selection_after_removal(selected: usize, removed: usize, rendered_len: usize) -> usize {
+    let shifted = if removed < selected {
+        selected - 1
+    } else {
+        selected
+    };
+    shifted.min(rendered_len.saturating_sub(2))
 }
 
 /// Collapse a clipboard entry to a single trimmed preview line for the popup.
@@ -592,6 +796,39 @@ fn center_on_screen(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleting_above_the_highlight_follows_it_up() {
+        // Rows below the deleted one shift up, so the highlight must too or it
+        // lands on the neighbour of the entry the user was looking at.
+        assert_eq!(selection_after_removal(3, 1, 5), 2);
+        assert_eq!(selection_after_removal(1, 0, 5), 0);
+    }
+
+    #[test]
+    fn deleting_below_the_highlight_leaves_it_alone() {
+        assert_eq!(selection_after_removal(1, 3, 5), 1);
+    }
+
+    #[test]
+    fn deleting_the_highlighted_row_lands_on_what_was_next() {
+        // Same index, one shorter list — that's the row that moved up into it.
+        assert_eq!(selection_after_removal(2, 2, 5), 2);
+    }
+
+    #[test]
+    fn deleting_the_highlighted_last_row_clamps_to_the_new_last() {
+        // Nothing moves up into the old index here, so it would point past the
+        // end of the shortened list.
+        assert_eq!(selection_after_removal(4, 4, 5), 3);
+    }
+
+    #[test]
+    fn deleting_the_only_entry_does_not_underflow() {
+        // An empty list has no row to highlight; the clamp must saturate rather
+        // than wrap to usize::MAX.
+        assert_eq!(selection_after_removal(0, 0, 1), 0);
+    }
 
     #[test]
     fn preview_collapses_whitespace() {

@@ -1,0 +1,9 @@
+# Revisions to skip when running `git blame`, so bulk reformatting doesn't
+# show up as the last change to every line.
+#
+# Enable locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub's blame view honours this file automatically.
+
+# Format the tree with rustfmt
+32286826dda20ac9b5bc6c786d4cbaa5ba3e68cd

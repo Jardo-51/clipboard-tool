@@ -1,0 +1,42 @@
+[package]
+name = "clipboard-tool"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight cross-platform clipboard history manager"
+
+[dependencies]
+arboard = "3.6.1"
+auto-launch = "0.6.0"
+clipboard-master = "4.0.0"
+dirs = "6.0.0"
+# default-features disabled to drop the `accesskit` feature: on Linux its
+# `accesskit_unix` thread opens a zbus connection with no Tokio runtime, and
+# because `ashpd` unifies zbus onto its `tokio` feature process-wide, that
+# thread panics at startup ("there is no reactor running"). With panic=abort in
+# release this aborts the whole app. We don't need AT-SPI for this popup, so we
+# re-list eframe's other defaults minus accesskit (web_screen_reader is web-only).
+eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "wayland", "wgpu", "x11"] }
+egui = "0.35.0"
+# `wayland` enables the virtual-keyboard injection backend (wlroots: Sway/Hyprland);
+# enigo auto-selects X11 vs Wayland at runtime.
+enigo = { version = "0.6.1", features = ["wayland"] }
+global-hotkey = "0.8.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.3"
+tray-icon = "0.24.1"
+
+# Linux-only: the GTK tray loop and the Wayland GlobalShortcuts portal hotkey.
+# Kept off the Windows/macOS builds to stay lean there.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "global_shortcuts"] }
+tokio = { version = "1.53.1", features = ["rt", "net", "time", "macros"] }
+futures-util = "0.3"
+
+[profile.release]
+opt-level = "z"     # optimize for size (resource-efficient goal)
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -227,7 +227,9 @@ persist = true
   written atomically (temp file + rename), flushed every few seconds when it
   changes and on quit. Each entry is stored as `{"text": …, "favorite": …}`; a
   file written by an older build — a plain array of strings — still loads, with
-  nothing starred.
+  nothing starred. A file that can't be parsed at all is moved aside to
+  `history.json.corrupt` and reported on stderr, so the next save doesn't
+  overwrite the only copy of it.
 - `history_size` caps the *unstarred* items only. Favorites are exempt, so
   pinning something means it is still there after a busy day of copying; they
   only go away when you unstar them, delete them, or use **Clear history**.

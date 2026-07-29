@@ -57,17 +57,49 @@ pub fn history_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("clipboard-tool").join("history.json"))
 }
 
-/// Load a previously saved history, in the order it was written. Missing or
-/// corrupt files yield an empty list rather than failing.
+/// Load a previously saved history, in the order it was written. A missing file
+/// yields an empty list; an unparseable one yields an empty list too, rather
+/// than failing the startup that reads it — but it is moved aside first and the
+/// reason is printed.
+///
+/// Returning empty is not the inert act it looks like. The first copy after
+/// startup marks the store dirty, and the next flush renames a fresh
+/// `history.json` over the old one, so a file this function merely ignored is
+/// gone for good within seconds. That is a lot to do silently to the only copy
+/// of something the user never asked to delete, and it doesn't take a mangled
+/// file to reach: `serde`'s untagged enum fails the *whole* array on one bad
+/// element, so a single hand-edited entry takes out every other one with it.
+///
+/// Keeping the bytes under a sibling name costs a rename and leaves the user
+/// something to salvage; saying so on stderr follows the precedent [`push`] sets
+/// when it skips an oversized entry.
+///
+/// [`push`]: crate::history::HistoryStore::push
 pub fn load(path: &Path) -> Vec<Entry> {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    serde_json::from_str::<Vec<RawItem>>(&contents)
-        .unwrap_or_default()
-        .into_iter()
-        .map(Entry::from)
-        .collect()
+    match serde_json::from_str::<Vec<RawItem>>(&contents) {
+        Ok(items) => items.into_iter().map(Entry::from).collect(),
+        Err(e) => {
+            let aside = path.with_extension("json.corrupt");
+            match std::fs::rename(path, &aside) {
+                Ok(()) => eprintln!(
+                    "history: {} could not be read ({e}); starting with an empty history. \
+                     The unreadable file has been kept as {}.",
+                    path.display(),
+                    aside.display()
+                ),
+                Err(rename_error) => eprintln!(
+                    "history: {} could not be read ({e}), and could not be moved aside \
+                     ({rename_error}); starting with an empty history. Copy the file \
+                     elsewhere now if you want to keep it — the next save overwrites it.",
+                    path.display()
+                ),
+            }
+            Vec::new()
+        }
+    }
 }
 
 /// Save the history, in the order given, via a temp-file + rename, so an
@@ -222,9 +254,10 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_history_loads_empty() {
+    fn a_corrupt_history_loads_empty_and_is_kept() {
         // Neither shape: the file is ignored rather than failing the startup
-        // that reads it.
+        // that reads it — but the next save would otherwise overwrite it, so the
+        // bytes have to survive somewhere the user can get at them.
         let dir =
             std::env::temp_dir().join(format!("clipboard-tool-corrupt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -232,6 +265,32 @@ mod tests {
 
         std::fs::write(&path, "{ not json at all").unwrap();
         assert!(load(&path).is_empty());
+        assert!(!path.exists(), "the unreadable file must be out of the way");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("history.json.corrupt")).unwrap(),
+            "{ not json at all"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn one_bad_entry_does_not_take_the_file_down_silently() {
+        // `untagged` fails the whole array on a single malformed element, so a
+        // hand edit is enough to lose everything. It still loads empty, but the
+        // other entries have to be recoverable from the file left behind.
+        let dir =
+            std::env::temp_dir().join(format!("clipboard-tool-partial-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+
+        let written = r#"[{"text":"keep me","favorite":true},{"text":5}]"#;
+        std::fs::write(&path, written).unwrap();
+        assert!(load(&path).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("history.json.corrupt")).unwrap(),
+            written
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

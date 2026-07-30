@@ -602,10 +602,21 @@ impl eframe::App for PopupApp {
         // bump wants checking against that function: everything below is built
         // on the window being shown out from under us exactly once.)
         //
-        // This frame does nothing else. A hotkey can already be pending on it —
-        // the threads that set the flag are started before the first frame runs
-        // — and letting the grow below happen here would put the resize inside
-        // the very gap between the map and the unmap that it exists to avoid.
+        // This frame does nothing else, the grow below included. A hotkey can
+        // already be pending here — the threads that set the flag start before
+        // the first frame runs — and a resize queued alongside the hide is a
+        // resize sent into the gap between the map and the unmap, which is the
+        // one thing this arrangement exists to stay out of.
+        //
+        // Holding it off this frame narrows that race without closing it: the
+        // gap is frames wide (see below), so a hotkey pressed in the first
+        // milliseconds still grows the window while the forced map is up, and
+        // the popup opens through one full-sized flash. Closing it would mean
+        // knowing when the unmap actually landed, and there is nothing to ask:
+        // eframe leaves `ViewportInfo::visible` unset on every platform, so the
+        // app has no view of whether its own window is on screen. What is left
+        // is to keep the window that is racing as small as possible, which is
+        // what the rest of this does.
         if !self.initialized {
             self.initialized = true;
             if !self.visible {

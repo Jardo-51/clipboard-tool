@@ -633,10 +633,11 @@ impl eframe::App for PopupApp {
         // ([`POPUP_INITIAL_SIZE`]) rather than at its real size: a window that
         // small cannot be told from no window at all. Parking it off the edge of
         // the screen instead, which would need none of this, was tried and does
-        // not hold: a window manager is free to place a window where it likes,
-        // and Mutter does — asked for (-1040,-680), it moved the window to
-        // (72,27) before mapping it, and the flash happened in plain view. Size
-        // is honoured where position is not. Growing it back waits for
+        // not hold — a window manager places new windows where it likes, and
+        // Mutter moves them back on screen before mapping them. Size is honoured
+        // where position is not; the measurements are in
+        // `docs/design-decisions/parking-the-popup-off-screen.md`. Growing it
+        // back waits for
         // the first show, which is the first moment the window is known to be
         // off screen. The hide above is not that moment: it is a request, and
         // the unmap that answers it was measured arriving some 70ms and half a

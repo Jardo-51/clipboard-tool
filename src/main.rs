@@ -592,24 +592,40 @@ impl eframe::App for PopupApp {
     /// frame — once the viewport is visible — does `ui` start being called.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // `ViewportBuilder::with_visible(false)` only holds until the first
-        // frame is painted: eframe's `post_rendering` then calls
+        // frame is painted: eframe 0.35's `post_rendering` then calls
         // `set_visible(true)` unconditionally, on the reasoning that a window
         // should not be shown before it has something in it. Nothing the app
         // sends can get in front of that — viewport commands are processed at
         // the end of a frame, after the paint they follow — so the window is
         // going to be put on screen once, and asking for it back is the only
-        // answer available. Do that here, on the first frame.
+        // answer available. Do that here, on the first frame. (A dependency
+        // bump wants checking against that function: everything below is built
+        // on the window being shown out from under us exactly once.)
+        //
+        // This frame does nothing else. A hotkey can already be pending on it —
+        // the threads that set the flag are started before the first frame runs
+        // — and letting the grow below happen here would put the resize inside
+        // the very gap between the map and the unmap that it exists to avoid.
         if !self.initialized {
             self.initialized = true;
             if !self.visible {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
+            // A show pending on this frame has spent its repaint getting here,
+            // so ask for the frame that will serve it.
+            ctx.request_repaint();
+            return;
         }
 
         // That map-then-unmap pair is what the user sees as a flash at startup,
         // and it is the reason the window is born one point across
         // ([`POPUP_INITIAL_SIZE`]) rather than at its real size: a window that
-        // small cannot be told from no window at all. Growing it back waits for
+        // small cannot be told from no window at all. Parking it off the edge of
+        // the screen instead, which would need none of this, was tried and does
+        // not hold: a window manager is free to place a window where it likes,
+        // and Mutter does — asked for (-1040,-680), it moved the window to
+        // (72,27) before mapping it, and the flash happened in plain view. Size
+        // is honoured where position is not. Growing it back waits for
         // the first show, which is the first moment the window is known to be
         // off screen. The hide above is not that moment: it is a request, and
         // the unmap that answers it was measured arriving some 70ms and half a

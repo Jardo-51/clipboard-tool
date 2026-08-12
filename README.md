@@ -247,8 +247,10 @@ record_file_paths = true
   and pasting the lot is what a shell or an editor makes use of. Set
   `record_file_paths = false` if you would rather keep file copies out of the
   history — copying a file to move it elsewhere is not always something you want
-  offered back as a paste. Turning it off drops those copies rather than storing
-  the `file://` URIs the file manager also publishes.
+  offered back as a paste. Turning it off drops those copies outright rather
+  than falling back to the text the file manager publishes alongside the files —
+  that is the same copy by another name, so falling back would leave the setting
+  doing nothing.
 - `history_size` caps the *unstarred* items only. Favorites are exempt, so
   pinning something means it is still there after a busy day of copying; they
   only go away when you unstar them or delete them — even **Clear history

@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `record_file_paths` config option (default `true`) to turn the above off, for
   anyone who would rather not have the files they copy in the file manager
   offered back as pastes. Turning it off leaves those copies out of the history
-  rather than falling back to the `file://` URIs the file manager also
-  publishes.
+  entirely, rather than falling back to the text the file manager publishes
+  alongside the files — that is the same copy by another name.
 
 ## [0.1.0] - 2026-07-29
 

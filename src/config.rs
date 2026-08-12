@@ -33,10 +33,9 @@ pub struct Config {
     /// Whether a file-manager copy is recorded as the path(s) it names.
     ///
     /// Turning this off drops those copies rather than falling back to the text
-    /// flavour the file manager also publishes. That flavour holds the same
-    /// files as `file://` URIs, so falling back would swap a readable path for a
-    /// percent-encoded URI — more history clutter than the setting removes, and
-    /// the opposite of what someone turning it off is asking for.
+    /// flavour the file manager publishes alongside the files. That flavour is
+    /// the same copy by another name, so falling back would go on recording
+    /// every file copy — merely unlabelled — and the setting would do nothing.
     pub record_file_paths: bool,
 }
 

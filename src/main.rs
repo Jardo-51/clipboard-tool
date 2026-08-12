@@ -419,13 +419,16 @@ fn spawn_clipboard_watcher(shared: Arc<Shared>, record_file_paths: bool) {
 /// What the clipboard currently holds, as the text to record and the kind of
 /// entry it makes — or `None` when it holds nothing this history can store.
 ///
-/// The file list is asked for first, not as a fallback. File managers publish
-/// the copied files *and* a text flavour holding the same `file://` URIs, so
-/// text-first would record `file:///home/me/notes%20.md` and never look at the
-/// paths at all. Asking the other way round costs an ordinary text copy one
-/// extra round trip, which the clipboard owner refuses outright rather than
-/// leaving to time out, on a thread that is only woken by a copy in the first
-/// place.
+/// The file list is asked for first, not as a fallback. It is the flavour that
+/// identifies a copy as a file copy, and the only one that is always there:
+/// what a file manager puts in the *text* flavour is up to the desktop — GNOME's
+/// Files publishes the plain paths, others publish `file://` URIs, and a Windows
+/// `CF_HDROP` copy carries no text at all. Text-first would therefore record a
+/// URI on one desktop and nothing on another, and even where it happens to
+/// yield the right string it lands the entry in the history unlabelled. Asking
+/// this way round costs an ordinary text copy one extra round trip, which the
+/// clipboard owner refuses outright rather than leaving to time out, on a thread
+/// that is only woken by a copy in the first place.
 ///
 /// A file list that yields no paths falls through to the text flavour. That is
 /// not a defensive branch: a browser publishes a `text/uri-list` of `https://`
@@ -459,12 +462,12 @@ enum FileListOutcome {
     /// A file copy the user has asked not to record, via `record_file_paths`.
     ///
     /// The copy is dropped rather than falling through to the text flavour the
-    /// file manager also publishes. That flavour holds the same files as
-    /// `file://` URIs, so falling through would answer "don't record my file
-    /// copies" with a history full of `file:///home/me/notes%20.md` — more
-    /// clutter than the setting removes, and unusable as a path besides. The
-    /// list is still asked for even when the setting is off, because
-    /// recognising the copy is the only way to leave it out.
+    /// file manager publishes alongside the files. That flavour is the same copy
+    /// by another name — GNOME's Files puts the very same paths there — so
+    /// falling through would go on recording every file copy, merely without the
+    /// mark saying what it is, and the setting would do nothing at all. The list
+    /// is still asked for when the setting is off, because recognising the copy
+    /// is the only way to leave it out.
     Ignore,
     /// Not a file copy at all, so the caller should try the text flavour.
     ///
@@ -500,10 +503,11 @@ fn classify_file_list(paths: &[PathBuf], record_file_paths: bool) -> FileListOut
 /// it would put the pieces on separate rows that can then age out apart.
 ///
 /// The trailing `\r` trim earns its place: `text/uri-list` is defined with CRLF
-/// line endings, and the decoder these paths come from splits on `\n` alone, so
-/// a path can arrive with the carriage return still glued to it. Only that one
-/// character is trimmed — a filename really can end in a space, and quietly
-/// rewriting it would hand the user a path that doesn't resolve.
+/// line endings — GNOME's Files does send them — and the decoder these paths
+/// come from splits on `\n` alone, so a path arrives with the carriage return
+/// still glued to it. Only that one character is trimmed: a filename really can
+/// end in a space, and quietly rewriting it would hand the user a path that
+/// doesn't resolve.
 fn paths_to_text(paths: &[PathBuf]) -> Option<String> {
     let joined = paths
         .iter()
@@ -1045,9 +1049,9 @@ mod tests {
 
     #[test]
     fn a_file_copy_is_dropped_rather_than_stored_as_a_uri_when_turned_off() {
-        // Not `NotAFileCopy`: falling through would record the `file://` URIs
-        // the file manager also publishes, which is the opposite of what
-        // `record_file_paths = false` asks for.
+        // Not `NotAFileCopy`: falling through would reach the text the file
+        // manager publishes alongside the files and record the copy anyway,
+        // leaving `record_file_paths = false` with nothing to do.
         assert_eq!(
             classify_file_list(&[PathBuf::from("/home/me/notes.md")], false),
             FileListOutcome::Ignore

@@ -21,7 +21,27 @@ use std::sync::Arc;
 /// history at `history_size` × 1 MiB in the worst case.
 const MAX_ITEM_BYTES: usize = 1024 * 1024;
 
-/// One history entry: the copied text plus whether the user has starred it.
+/// Where an entry's text came from.
+///
+/// Everything in the store is text, and pasting is the same act either way — the
+/// distinction is only about how the entry was *obtained*, and so how to present
+/// it. A [`Paths`] entry was assembled from a file-manager copy, where the
+/// clipboard carried a list of files rather than anything the user typed or
+/// selected; the popup marks those rows so a bare `/home/me/notes` is not
+/// indistinguishable from the same string copied out of a terminal.
+///
+/// [`Paths`]: Self::Paths
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EntryKind {
+    /// Ordinary copied text.
+    #[default]
+    Text,
+    /// One or more filesystem paths, newline-separated, from a file-manager copy.
+    Paths,
+}
+
+/// One history entry: the copied text, whether the user has starred it, and
+/// where it came from.
 ///
 /// The text is an `Arc<str>` rather than a `String` because the UI snapshots the
 /// whole list on every frame it renders, to avoid holding the lock across
@@ -32,13 +52,19 @@ const MAX_ITEM_BYTES: usize = 1024 * 1024;
 pub struct Entry {
     pub text: Arc<str>,
     pub favorite: bool,
+    pub kind: EntryKind,
 }
 
 impl Entry {
     pub fn new(text: impl Into<Arc<str>>, favorite: bool) -> Self {
+        Self::with_kind(text, favorite, EntryKind::Text)
+    }
+
+    pub fn with_kind(text: impl Into<Arc<str>>, favorite: bool, kind: EntryKind) -> Self {
         Self {
             text: text.into(),
             favorite,
+            kind,
         }
     }
 }
@@ -112,12 +138,26 @@ impl HistoryStore {
         }
     }
 
+    /// Record a newly copied value as ordinary text. See [`push_kind`].
+    ///
+    /// [`push_kind`]: Self::push_kind
+    #[allow(dead_code)] // test-only helper; the watcher always knows the kind
+    pub fn push(&mut self, value: String) -> bool {
+        self.push_kind(value, EntryKind::Text)
+    }
+
     /// Record a newly copied value. Ignores empties and entries larger than
     /// [`MAX_ITEM_BYTES`]; de-duplicates by moving an existing identical entry
     /// to the front of its own block instead of adding a second copy — a
     /// re-copied favorite stays a favorite, and stays above the unstarred items.
-    /// Returns `true` if the stored contents/order changed.
-    pub fn push(&mut self, value: String) -> bool {
+    /// Returns `true` if the stored contents/order/kind changed.
+    ///
+    /// Re-copying an existing entry adopts the new `kind`. The same string can
+    /// legitimately arrive both ways — copying `/etc/hosts` in a terminal and
+    /// then copying the file itself in the file manager yields one entry, since
+    /// contents identify an entry throughout this module — and the kind the user
+    /// most recently produced is the one the row should be labelled with.
+    pub fn push_kind(&mut self, value: String, kind: EntryKind) -> bool {
         if value.is_empty() {
             return false;
         }
@@ -134,17 +174,19 @@ impl HistoryStore {
         }
         if let Some(pos) = self.position(&value) {
             // Already present — promote to most-recent within its own block.
-            let entry = self.items.remove(pos).expect("position is in bounds");
+            let mut entry = self.items.remove(pos).expect("position is in bounds");
+            let kind_changed = entry.kind != kind;
+            entry.kind = kind;
             let target = if entry.favorite {
                 0
             } else {
                 self.favorite_count()
             };
             self.items.insert(target, entry);
-            return pos != target;
+            return pos != target || kind_changed;
         }
         self.items
-            .insert(self.favorite_count(), Entry::new(value, false));
+            .insert(self.favorite_count(), Entry::with_kind(value, false, kind));
         self.trim_to_capacity();
         true
     }
@@ -263,7 +305,9 @@ impl HistoryStore {
     /// Collapsing merges the star rather than taking it from whichever copy came
     /// first: a file holding `"dup"` unstarred above `"dup"` starred is asking
     /// for one entry that is starred, and dropping the flag on the way in is the
-    /// part of a duplicate the user would actually notice.
+    /// part of a duplicate the user would actually notice. The kind merges the
+    /// same way and for the same reason — [`EntryKind::Paths`] is the one that
+    /// says something, so it survives a merge with a plain-text duplicate.
     ///
     /// [`remove`]: Self::remove
     /// [`snapshot`]: Self::snapshot
@@ -273,7 +317,12 @@ impl HistoryStore {
             std::collections::HashMap::new();
         for entry in items.into_iter().filter(|e| e.text.len() <= MAX_ITEM_BYTES) {
             match first_seen.get(&entry.text) {
-                Some(&at) => merged[at].favorite |= entry.favorite,
+                Some(&at) => {
+                    merged[at].favorite |= entry.favorite;
+                    if entry.kind == EntryKind::Paths {
+                        merged[at].kind = EntryKind::Paths;
+                    }
+                }
                 None => {
                     first_seen.insert(entry.text.clone(), merged.len());
                     merged.push(entry);
@@ -324,6 +373,68 @@ mod tests {
     /// deserializes to.
     fn plain(items: &[&str]) -> Vec<Entry> {
         items.iter().map(|s| Entry::new(*s, false)).collect()
+    }
+
+    /// The stored kinds in order, to pair with [`texts`].
+    fn kinds(h: &HistoryStore) -> Vec<EntryKind> {
+        h.iter().map(|e| e.kind).collect()
+    }
+
+    #[test]
+    fn a_path_copy_is_recorded_as_a_path_entry() {
+        let mut h = HistoryStore::new(5);
+        h.push("typed".into());
+        h.push_kind("/home/me/notes".into(), EntryKind::Paths);
+        assert_eq!(texts(&h), ["/home/me/notes", "typed"]);
+        assert_eq!(kinds(&h), [EntryKind::Paths, EntryKind::Text]);
+    }
+
+    #[test]
+    fn re_copying_the_same_string_the_other_way_relabels_the_entry() {
+        // Copying `/etc/hosts` in a terminal and then copying the file itself is
+        // one entry, because contents identify an entry here. The row has to
+        // follow the copy the user just made rather than keep the older label.
+        let mut h = HistoryStore::new(5);
+        assert!(h.push("/etc/hosts".into()));
+        assert!(h.push_kind("/etc/hosts".into(), EntryKind::Paths));
+        assert_eq!(h.len(), 1);
+        assert_eq!(kinds(&h), [EntryKind::Paths]);
+
+        // ...and back again, which is the case a plain `pos != target` check
+        // misses: the entry is already at the front, so only the kind changed.
+        assert!(h.push("/etc/hosts".into()));
+        assert_eq!(kinds(&h), [EntryKind::Text]);
+    }
+
+    #[test]
+    fn re_copying_an_unchanged_path_entry_reports_no_change() {
+        let mut h = HistoryStore::new(5);
+        h.push_kind("/home/me/notes".into(), EntryKind::Paths);
+        assert!(!h.push_kind("/home/me/notes".into(), EntryKind::Paths));
+    }
+
+    #[test]
+    fn starring_a_path_entry_keeps_it_a_path_entry() {
+        let mut h = HistoryStore::new(5);
+        h.push_kind("/home/me/notes".into(), EntryKind::Paths);
+        h.push("other".into());
+        assert!(h.toggle_favorite("/home/me/notes"));
+        assert_eq!(flags(&h), [true, false]);
+        assert_eq!(kinds(&h), [EntryKind::Paths, EntryKind::Text]);
+    }
+
+    #[test]
+    fn restore_keeps_the_kind_and_merges_it_across_duplicates() {
+        // A duplicate is collapsed onto the first occurrence, and `Paths` is the
+        // flag that says something — so it survives, whichever copy carried it.
+        let mut h = HistoryStore::new(5);
+        h.restore(vec![
+            Entry::new("dup", false),
+            Entry::with_kind("dup", false, EntryKind::Paths),
+            Entry::with_kind("/home/me/notes", false, EntryKind::Paths),
+        ]);
+        assert_eq!(texts(&h), ["dup", "/home/me/notes"]);
+        assert_eq!(kinds(&h), [EntryKind::Paths, EntryKind::Paths]);
     }
 
     #[test]

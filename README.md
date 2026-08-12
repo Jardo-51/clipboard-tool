@@ -12,6 +12,8 @@ drops it.
 - **Cross-platform**: Linux (X11 + Wayland), Windows, macOS
 - **Favorites**: starred items stay pinned above the rolling history and are
   never evicted to make room for new copies
+- **File paths**: copying a file or directory in your file manager records its
+  path, so you can paste the path as text wherever you need it
 - **Resource-efficient**: native binary, no runtime/GC, size-optimized release
   profile, event-driven (idle at rest)
 - **Configurable** hotkey, history size, and persistence
@@ -34,6 +36,7 @@ drops it.
 |---|---|---|---|---|---|
 | Global hotkey | ✅ | ✅ portal | ⚠️ use tray "Show history" | ✅ | ✅¹ |
 | Clipboard history | ✅ | ✅ | ✅ | ✅ | ✅ |
+| File paths from the file manager | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Auto-paste | ✅ | ⚠️ manual Ctrl+V² | ✅ virtual keyboard | ✅ | ✅¹ |
 | Autostart | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Tray icon | ✅³ | ✅³ | ✅³ | ⏳⁴ | ⏳⁴ |
@@ -225,11 +228,19 @@ persist = true
   history** instead, or pick a different `hotkey`.
 - History is persisted to `~/.local/share/clipboard-tool/history.json` (Linux),
   written atomically (temp file + rename), flushed every few seconds when it
-  changes and on quit. Each entry is stored as `{"text": …, "favorite": …}`; a
-  file written by an older build — a plain array of strings — still loads, with
-  nothing starred. A file that can't be parsed at all is moved aside to
+  changes and on quit. Each entry is stored as `{"text": …, "favorite": …}`,
+  plus `"kind": "paths"` on the entries that came from a file-manager copy; a
+  file written by an older build — a plain array of strings, or one without the
+  `kind` field — still loads, with nothing starred and everything treated as
+  ordinary text. A file that can't be parsed at all is moved aside to
   `history.json.corrupt` and reported on stderr, so the next save doesn't
   overwrite the only copy of it.
+- Copying a **file or directory** in your file manager records its path. Such a
+  copy puts a list of files on the clipboard rather than text, so it used to be
+  ignored entirely; now the paths are stored as the entry's text and the row is
+  marked with a folder icon. Selecting one pastes the path. Copying several
+  files at once gives one entry with one path per line, since it was one action
+  and pasting the lot is what a shell or an editor makes use of.
 - `history_size` caps the *unstarred* items only. Favorites are exempt, so
   pinning something means it is still there after a busy day of copying; they
   only go away when you unstar them or delete them — even **Clear history

@@ -36,7 +36,7 @@ use config::Config;
 
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 
-use history::HistoryStore;
+use history::{EntryKind, HistoryStore};
 
 /// Wide enough that the preview keeps roughly the room it had before the star
 /// button joined the trash icon at the end of each row.
@@ -61,6 +61,13 @@ const DELETE_ICON: &str = "🗑";
 /// outlined counterpart there, so the pair would not match.
 const FAVORITE_ICON_ON: &str = "★";
 const FAVORITE_ICON_OFF: &str = "☆";
+/// Glyph marking a row whose text is a path the user copied in their file
+/// manager, rather than text they copied as text. Without it `/home/me/notes`
+/// reads exactly like the same string copied out of a terminal, and the two
+/// come from different places. U+1F4C1 is carried by `NotoEmoji`, the other font
+/// egui's defaults fall back to besides the `emoji-icon-font` that supplies
+/// [`DELETE_ICON`].
+const PATH_ICON: &str = "📁";
 /// Breathing room between the delete icons and whatever is to their right — the
 /// scroll bar when the list overflows, the window margin when it doesn't.
 const ROW_TRAILING_GAP: f32 = 6.0;
@@ -359,12 +366,12 @@ fn spawn_clipboard_watcher(shared: Arc<Shared>) {
 
     impl ClipboardHandler for Handler {
         fn on_clipboard_change(&mut self) -> CallbackResult {
-            if let Ok(text) = self.clipboard.get_text() {
+            if let Some((value, kind)) = read_clipboard(&mut self.clipboard) {
                 let changed = self
                     .shared
                     .history
                     .lock()
-                    .map(|mut hist| hist.push(text))
+                    .map(|mut hist| hist.push_kind(value, kind))
                     .unwrap_or(false);
                 if changed {
                     self.shared.dirty.store(true, Ordering::SeqCst);
@@ -397,6 +404,56 @@ fn spawn_clipboard_watcher(shared: Arc<Shared>) {
             Err(e) => eprintln!("failed to start clipboard master: {e}"),
         }
     });
+}
+
+/// What the clipboard currently holds, as the text to record and the kind of
+/// entry it makes — or `None` when it holds nothing this history can store.
+///
+/// The file list is asked for first, not as a fallback. File managers publish
+/// the copied files *and* a text flavour holding the same `file://` URIs, so
+/// text-first would record `file:///home/me/notes%20.md` and never look at the
+/// paths at all. Asking the other way round costs an ordinary text copy one
+/// extra round trip, which the clipboard owner refuses outright rather than
+/// leaving to time out, on a thread that is only woken by a copy in the first
+/// place.
+///
+/// A file list that yields no paths falls through to the text flavour. That is
+/// not a defensive branch: a browser publishes a `text/uri-list` of `https://`
+/// URLs when you copy a link, and the decoder keeps only the `file://` ones, so
+/// an empty list is the normal way of saying "this is not a file copy".
+fn read_clipboard(clipboard: &mut arboard::Clipboard) -> Option<(String, EntryKind)> {
+    if let Ok(paths) = clipboard.get().file_list() {
+        if let Some(text) = paths_to_text(&paths) {
+            return Some((text, EntryKind::Paths));
+        }
+    }
+    clipboard
+        .get_text()
+        .ok()
+        .map(|text| (text, EntryKind::Text))
+}
+
+/// Render a clipboard file list as the text to store: one path per line, in the
+/// order the file manager listed them. `None` when nothing usable is left.
+///
+/// A multi-file copy becomes a multi-line entry rather than several entries. It
+/// was one action by the user, the popup commits one row at a time, and pasting
+/// the lot is what a shell or an editor does something useful with — splitting
+/// it would put the pieces on separate rows that can then age out apart.
+///
+/// The trailing `\r` trim earns its place: `text/uri-list` is defined with CRLF
+/// line endings, and the decoder these paths come from splits on `\n` alone, so
+/// a path can arrive with the carriage return still glued to it. Only that one
+/// character is trimmed — a filename really can end in a space, and quietly
+/// rewriting it would hand the user a path that doesn't resolve.
+fn paths_to_text(paths: &[PathBuf]) -> Option<String> {
+    let joined = paths
+        .iter()
+        .map(|path| path.to_string_lossy().trim_end_matches('\r').to_owned())
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!joined.is_empty()).then_some(joined)
 }
 
 struct PopupApp {
@@ -740,10 +797,27 @@ impl eframe::App for PopupApp {
                                         // background; painting the highlight by hand
                                         // means putting it back by hand.
                                         ui.add_space(ui.spacing().button_padding.x);
+                                        let selected_color = ui.visuals().selection.stroke.color;
+                                        // Ahead of the preview, so the mark reads
+                                        // as a property of the row rather than of
+                                        // the first path in it. Unframed and
+                                        // unselectable: it labels the row, it
+                                        // isn't a third button on it.
+                                        if item.kind == EntryKind::Paths {
+                                            let mut icon = egui::RichText::new(PATH_ICON);
+                                            if selected {
+                                                icon = icon.color(selected_color);
+                                            }
+                                            ui.add(egui::Label::new(icon).selectable(false))
+                                                .on_hover_text(
+                                                    "Copied in the file manager — \
+                                                     pastes the path",
+                                                );
+                                        }
                                         let mut text =
                                             egui::RichText::new(one_line_preview(&item.text));
                                         if selected {
-                                            text = text.color(ui.visuals().selection.stroke.color);
+                                            text = text.color(selected_color);
                                         }
                                         // Not a `selectable_label`: the row paints its
                                         // own highlight below, across the icon too, so
@@ -902,6 +976,53 @@ fn center_on_screen(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_single_copied_file_becomes_its_path() {
+        assert_eq!(
+            paths_to_text(&[PathBuf::from("/home/me/notes.md")]).as_deref(),
+            Some("/home/me/notes.md")
+        );
+    }
+
+    #[test]
+    fn a_multi_file_copy_becomes_one_entry_per_line() {
+        // One action by the user, so one row in the popup — and one paste that a
+        // shell or an editor does something useful with.
+        assert_eq!(
+            paths_to_text(&[PathBuf::from("/home/me/a"), PathBuf::from("/home/me/b")]).as_deref(),
+            Some("/home/me/a\n/home/me/b")
+        );
+    }
+
+    #[test]
+    fn a_crlf_uri_list_does_not_leave_a_carriage_return_on_the_path() {
+        // `text/uri-list` is defined with CRLF endings and the decoder upstream
+        // splits on `\n`, so the `\r` arrives glued to the path. Pasting it
+        // would produce a path nothing can open.
+        assert_eq!(
+            paths_to_text(&[PathBuf::from("/home/me/notes.md\r")]).as_deref(),
+            Some("/home/me/notes.md")
+        );
+    }
+
+    #[test]
+    fn a_filename_ending_in_a_space_is_left_alone() {
+        // Legal, if unusual. Trimming it would hand back a path that doesn't
+        // resolve, which is worse than an odd-looking row.
+        assert_eq!(
+            paths_to_text(&[PathBuf::from("/home/me/trailing ")]).as_deref(),
+            Some("/home/me/trailing ")
+        );
+    }
+
+    #[test]
+    fn a_file_list_with_nothing_in_it_is_not_an_entry() {
+        // What a browser's `text/uri-list` of `https://` links decodes to: the
+        // caller has to fall through to the text flavour rather than store this.
+        assert_eq!(paths_to_text(&[]), None);
+        assert_eq!(paths_to_text(&[PathBuf::from("\r")]), None);
+    }
 
     #[test]
     fn deleting_above_the_highlight_follows_it_up() {

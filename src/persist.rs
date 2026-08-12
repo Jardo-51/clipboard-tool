@@ -12,16 +12,40 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::history::Entry;
+use crate::history::{Entry, EntryKind};
 
 /// One entry as written to `history.json`.
 ///
 /// Borrowed on the way out so saving doesn't copy the entry texts, which are
 /// what the [`Entry`]'s `Arc<str>` exists to avoid.
+///
+/// `kind` is omitted for ordinary text, which is nearly every entry. That keeps
+/// a text-only history byte-identical to what earlier versions wrote, so the
+/// field only ever appears on the rows that actually need it.
 #[derive(Serialize)]
 struct StoredItem<'a> {
     text: &'a str,
     favorite: bool,
+    #[serde(skip_serializing_if = "StoredKind::is_text")]
+    kind: StoredKind,
+}
+
+/// [`EntryKind`] as it appears in `history.json`.
+///
+/// A separate type rather than `#[derive(Deserialize)]` on `EntryKind` itself:
+/// the file format is this module's business, and spelling it out here keeps the
+/// history model free of `serde` attributes.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum StoredKind {
+    Text,
+    Paths,
+}
+
+impl StoredKind {
+    fn is_text(&self) -> bool {
+        matches!(self, Self::Text)
+    }
 }
 
 /// One entry as read back. Files written before favorites existed hold a bare
@@ -29,6 +53,12 @@ struct StoredItem<'a> {
 /// behind, so both shapes stay readable — a plain string simply isn't a
 /// favorite. `serde`'s untagged enum tries the variants in order, and a JSON
 /// string can only match `Text`.
+///
+/// `kind` is defaulted for the same reason `favorite` is: it postdates both
+/// earlier shapes, and a file without it is a history of ordinary text. Nothing
+/// widens it to accept unrecognised spellings — a downgrade drops the field
+/// rather than mangling it, so the only way to produce one is a hand edit, which
+/// [`load`] already moves aside and reports.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum RawItem {
@@ -37,14 +67,42 @@ enum RawItem {
         text: String,
         #[serde(default)]
         favorite: bool,
+        #[serde(default)]
+        kind: Option<StoredKind>,
     },
+}
+
+impl From<StoredKind> for EntryKind {
+    fn from(kind: StoredKind) -> Self {
+        match kind {
+            StoredKind::Text => EntryKind::Text,
+            StoredKind::Paths => EntryKind::Paths,
+        }
+    }
+}
+
+impl From<EntryKind> for StoredKind {
+    fn from(kind: EntryKind) -> Self {
+        match kind {
+            EntryKind::Text => StoredKind::Text,
+            EntryKind::Paths => StoredKind::Paths,
+        }
+    }
 }
 
 impl From<RawItem> for Entry {
     fn from(raw: RawItem) -> Self {
         match raw {
             RawItem::Text(text) => Entry::new(text, false),
-            RawItem::Full { text, favorite } => Entry::new(text, favorite),
+            RawItem::Full {
+                text,
+                favorite,
+                kind,
+            } => Entry::with_kind(
+                text,
+                favorite,
+                kind.map(EntryKind::from).unwrap_or_default(),
+            ),
         }
     }
 }
@@ -123,6 +181,7 @@ pub fn save(path: &Path, items: &[Entry]) -> std::io::Result<()> {
         .map(|e| StoredItem {
             text: &e.text,
             favorite: e.favorite,
+            kind: e.kind.into(),
         })
         .collect();
     let json = serde_json::to_string(&stored)?;
@@ -234,6 +293,69 @@ mod tests {
         ];
         save(&path, &items).unwrap();
         assert_eq!(pairs(&load(&path)), pairs(&items));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `(text, kind)` pairs, for the tests that are about the kind rather than
+    /// the star.
+    fn kinds(items: &[Entry]) -> Vec<(&str, EntryKind)> {
+        items.iter().map(|e| (e.text.as_ref(), e.kind)).collect()
+    }
+
+    #[test]
+    fn roundtrip_preserves_the_entry_kind() {
+        let dir = std::env::temp_dir().join(format!("clipboard-tool-kind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+
+        let items = vec![
+            Entry::with_kind("/home/me/notes", true, EntryKind::Paths),
+            Entry::new("typed", false),
+        ];
+        save(&path, &items).unwrap();
+        assert_eq!(
+            kinds(&load(&path)),
+            [
+                ("/home/me/notes", EntryKind::Paths),
+                ("typed", EntryKind::Text)
+            ]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ordinary_text_is_written_without_a_kind() {
+        // The field is only meaningful on the rows that aren't plain text, and
+        // leaving it off keeps a text-only history byte-identical to what
+        // earlier versions wrote — which is also what an older binary reading
+        // this file expects to find.
+        let dir =
+            std::env::temp_dir().join(format!("clipboard-tool-nokind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+
+        save(&path, &[Entry::new("typed", false)]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"[{"text":"typed","favorite":false}]"#
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_pre_paths_history_loads_as_text() {
+        // Entries written before the kind existed carry no `kind` field, and
+        // everything in such a file was copied as text.
+        let dir =
+            std::env::temp_dir().join(format!("clipboard-tool-oldkind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+
+        std::fs::write(&path, r#"[{"text":"typed","favorite":true}]"#).unwrap();
+        assert_eq!(kinds(&load(&path)), [("typed", EntryKind::Text)]);
 
         std::fs::remove_dir_all(&dir).ok();
     }

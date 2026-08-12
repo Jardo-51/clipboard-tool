@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   text — only a list of files — and was dropped on the floor. A multi-file copy
   becomes one entry with one path per line, and the rows are marked with a
   folder icon to tell them apart from the same string copied as text.
+- `record_file_paths` config option (default `true`) to turn the above off, for
+  anyone who would rather not have the files they copy in the file manager
+  offered back as pastes. Turning it off leaves those copies out of the history
+  rather than falling back to the `file://` URIs the file manager also
+  publishes.
 
 ## [0.1.0] - 2026-07-29
 

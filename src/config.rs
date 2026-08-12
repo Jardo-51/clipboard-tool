@@ -17,6 +17,10 @@ const FILE_HEADER: &str = "\
 #               key is a physical code such as KeyV, KeyA, Digit1, etc.
 # history_size: maximum number of items to remember.
 # persist:      keep history across restarts (stored as JSON in the data dir).
+# record_file_paths:
+#               record a file/directory copied in the file manager as its path,
+#               so it can be pasted as text. Set to false to leave such copies
+#               out of the history entirely.
 
 ";
 
@@ -26,6 +30,14 @@ pub struct Config {
     pub hotkey: String,
     pub history_size: usize,
     pub persist: bool,
+    /// Whether a file-manager copy is recorded as the path(s) it names.
+    ///
+    /// Turning this off drops those copies rather than falling back to the text
+    /// flavour the file manager also publishes. That flavour holds the same
+    /// files as `file://` URIs, so falling back would swap a readable path for a
+    /// percent-encoded URI — more history clutter than the setting removes, and
+    /// the opposite of what someone turning it off is asking for.
+    pub record_file_paths: bool,
 }
 
 impl Default for Config {
@@ -34,6 +46,7 @@ impl Default for Config {
             hotkey: DEFAULT_HOTKEY.to_string(),
             history_size: 100,
             persist: true,
+            record_file_paths: true,
         }
     }
 }
@@ -184,6 +197,24 @@ mod tests {
         assert_eq!(cfg.history_size, 5);
         assert_eq!(cfg.hotkey, DEFAULT_HOTKEY);
         assert!(cfg.persist);
+        assert!(cfg.record_file_paths);
+    }
+
+    #[test]
+    fn recording_file_paths_is_on_unless_turned_off() {
+        // A config file predating the option must behave as it always did,
+        // which for this one means recording paths rather than opting out.
+        assert!(Config::default().record_file_paths);
+        assert!(
+            toml::from_str::<Config>("persist = false")
+                .unwrap()
+                .record_file_paths
+        );
+        assert!(
+            !toml::from_str::<Config>("record_file_paths = false")
+                .unwrap()
+                .record_file_paths
+        );
     }
 
     #[test]

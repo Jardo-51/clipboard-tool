@@ -217,6 +217,10 @@ history_size = 100
 
 # keep history across restarts (stored as JSON in the data dir)
 persist = true
+
+# record a file/directory copied in the file manager as its path, so it can be
+# pasted as text. Set to false to leave such copies out of the history entirely.
+record_file_paths = true
 ```
 
 - Missing fields fall back to defaults; a malformed file logs a warning and uses
@@ -240,7 +244,11 @@ persist = true
   ignored entirely; now the paths are stored as the entry's text and the row is
   marked with a folder icon. Selecting one pastes the path. Copying several
   files at once gives one entry with one path per line, since it was one action
-  and pasting the lot is what a shell or an editor makes use of.
+  and pasting the lot is what a shell or an editor makes use of. Set
+  `record_file_paths = false` if you would rather keep file copies out of the
+  history — copying a file to move it elsewhere is not always something you want
+  offered back as a paste. Turning it off drops those copies rather than storing
+  the `file://` URIs the file manager also publishes.
 - `history_size` caps the *unstarred* items only. Favorites are exempt, so
   pinning something means it is still there after a busy day of copying; they
   only go away when you unstar them or delete them — even **Clear history

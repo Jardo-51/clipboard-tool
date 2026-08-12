@@ -141,7 +141,7 @@ fn main() -> eframe::Result<()> {
     });
 
     // --- Clipboard watcher ------------------------------------------------
-    spawn_clipboard_watcher(shared.clone());
+    spawn_clipboard_watcher(shared.clone(), config.record_file_paths);
 
     // --- Throttled history persistence -------------------------------------
     spawn_persistence(shared.clone());
@@ -356,17 +356,23 @@ fn run_cli() -> Option<i32> {
 
 /// Spawns a thread that watches the OS clipboard and appends text changes to
 /// the shared history.
-fn spawn_clipboard_watcher(shared: Arc<Shared>) {
+///
+/// `record_file_paths` is passed in rather than kept on [`Shared`] the way
+/// `persist` is: this is the only thread that reads it, so there is nothing to
+/// share.
+fn spawn_clipboard_watcher(shared: Arc<Shared>, record_file_paths: bool) {
     use clipboard_master::{CallbackResult, ClipboardHandler, Master};
 
     struct Handler {
         shared: Arc<Shared>,
         clipboard: arboard::Clipboard,
+        record_file_paths: bool,
     }
 
     impl ClipboardHandler for Handler {
         fn on_clipboard_change(&mut self) -> CallbackResult {
-            if let Some((value, kind)) = read_clipboard(&mut self.clipboard) {
+            if let Some((value, kind)) = read_clipboard(&mut self.clipboard, self.record_file_paths)
+            {
                 let changed = self
                     .shared
                     .history
@@ -394,7 +400,11 @@ fn spawn_clipboard_watcher(shared: Arc<Shared>) {
                 return;
             }
         };
-        let handler = Handler { shared, clipboard };
+        let handler = Handler {
+            shared,
+            clipboard,
+            record_file_paths,
+        };
         match Master::new(handler) {
             Ok(mut master) => {
                 if let Err(e) = master.run() {
@@ -421,16 +431,64 @@ fn spawn_clipboard_watcher(shared: Arc<Shared>) {
 /// not a defensive branch: a browser publishes a `text/uri-list` of `https://`
 /// URLs when you copy a link, and the decoder keeps only the `file://` ones, so
 /// an empty list is the normal way of saying "this is not a file copy".
-fn read_clipboard(clipboard: &mut arboard::Clipboard) -> Option<(String, EntryKind)> {
+///
+/// With `record_file_paths` off, a copy that *does* name files is dropped
+/// instead — see [`FileListOutcome::Ignore`].
+fn read_clipboard(
+    clipboard: &mut arboard::Clipboard,
+    record_file_paths: bool,
+) -> Option<(String, EntryKind)> {
     if let Ok(paths) = clipboard.get().file_list() {
-        if let Some(text) = paths_to_text(&paths) {
-            return Some((text, EntryKind::Paths));
+        match classify_file_list(&paths, record_file_paths) {
+            FileListOutcome::Record(text) => return Some((text, EntryKind::Paths)),
+            FileListOutcome::Ignore => return None,
+            FileListOutcome::NotAFileCopy => {}
         }
     }
     clipboard
         .get_text()
         .ok()
         .map(|text| (text, EntryKind::Text))
+}
+
+/// What a clipboard file list means for the history.
+#[derive(Debug, PartialEq, Eq)]
+enum FileListOutcome {
+    /// A file copy, to be recorded as this text.
+    Record(String),
+    /// A file copy the user has asked not to record, via `record_file_paths`.
+    ///
+    /// The copy is dropped rather than falling through to the text flavour the
+    /// file manager also publishes. That flavour holds the same files as
+    /// `file://` URIs, so falling through would answer "don't record my file
+    /// copies" with a history full of `file:///home/me/notes%20.md` — more
+    /// clutter than the setting removes, and unusable as a path besides. The
+    /// list is still asked for even when the setting is off, because
+    /// recognising the copy is the only way to leave it out.
+    Ignore,
+    /// Not a file copy at all, so the caller should try the text flavour.
+    ///
+    /// A browser publishes a `text/uri-list` of `https://` URLs when you copy a
+    /// link, and the decoder keeps only the `file://` ones — an empty list is
+    /// the normal way of saying this, not a malformed clipboard.
+    NotAFileCopy,
+}
+
+/// Decide what to do with a file list, given the `record_file_paths` setting.
+///
+/// Split from [`read_clipboard`] because it is the part worth pinning down: the
+/// difference between [`Ignore`] and [`NotAFileCopy`] is a deliberate choice
+/// rather than an implementation detail, and it is invisible from a call site
+/// that has a live clipboard in its hands.
+///
+/// [`Ignore`]: FileListOutcome::Ignore
+/// [`NotAFileCopy`]: FileListOutcome::NotAFileCopy
+fn classify_file_list(paths: &[PathBuf], record_file_paths: bool) -> FileListOutcome {
+    match paths_to_text(paths) {
+        None => FileListOutcome::NotAFileCopy,
+        Some(_) if !record_file_paths => FileListOutcome::Ignore,
+        Some(text) => FileListOutcome::Record(text),
+    }
 }
 
 /// Render a clipboard file list as the text to store: one path per line, in the
@@ -976,6 +1034,36 @@ fn center_on_screen(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_copy_is_recorded_when_the_setting_is_on() {
+        assert_eq!(
+            classify_file_list(&[PathBuf::from("/home/me/notes.md")], true),
+            FileListOutcome::Record("/home/me/notes.md".into())
+        );
+    }
+
+    #[test]
+    fn a_file_copy_is_dropped_rather_than_stored_as_a_uri_when_turned_off() {
+        // Not `NotAFileCopy`: falling through would record the `file://` URIs
+        // the file manager also publishes, which is the opposite of what
+        // `record_file_paths = false` asks for.
+        assert_eq!(
+            classify_file_list(&[PathBuf::from("/home/me/notes.md")], false),
+            FileListOutcome::Ignore
+        );
+    }
+
+    #[test]
+    fn the_setting_does_not_affect_copies_that_name_no_files() {
+        // A browser's `text/uri-list` of `https://` links decodes to nothing.
+        // Turning the setting off must not start swallowing ordinary copies.
+        assert_eq!(classify_file_list(&[], true), FileListOutcome::NotAFileCopy);
+        assert_eq!(
+            classify_file_list(&[], false),
+            FileListOutcome::NotAFileCopy
+        );
+    }
 
     #[test]
     fn a_single_copied_file_becomes_its_path() {
